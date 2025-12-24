@@ -125,11 +125,9 @@ io.on('connection', (socket) => {
 
     // --- Clan Logic ---
 
-    // Join Clan Room on connect if user has clan
+    // Ensure user is in their clan room if applicable
     if (socket.user.clanId && CLANS[socket.user.clanId]) {
         socket.join(socket.user.clanId);
-        // Send initial clan data
-        socket.emit('clan_data', CLANS[socket.user.clanId]);
     }
 
     socket.on('get_clans', () => {
@@ -141,6 +139,15 @@ io.on('connection', (socket) => {
             memberCount: c.members.length
         }));
         socket.emit('clan_list', clanList);
+    });
+
+    // NEW: Explicitly fetch clan data (fixes race condition on client mount)
+    socket.on('get_clan_data', () => {
+        const clanId = socket.user.clanId;
+        if (clanId && CLANS[clanId]) {
+            socket.join(clanId); // Ensure join
+            socket.emit('clan_data', CLANS[clanId]);
+        }
     });
 
     socket.on('create_clan', ({ name, description }) => {
@@ -239,6 +246,7 @@ io.on('connection', (socket) => {
         // Keep history limited to 50
         if (CLANS[clanId].messages.length > 50) CLANS[clanId].messages.shift();
 
+        // Broadcast to everyone in the room (including sender)
         io.to(clanId).emit('clan_message', msg);
     });
 
@@ -248,8 +256,10 @@ io.on('connection', (socket) => {
 
         const msg = CLANS[clanId].messages.find(m => m.id === messageId);
         if (msg) {
+            if (!msg.reactions) msg.reactions = {};
             if (!msg.reactions[emoji]) msg.reactions[emoji] = 0;
             msg.reactions[emoji]++;
+            
             io.to(clanId).emit('clan_reaction_update', { messageId, reactions: msg.reactions });
         }
     });
