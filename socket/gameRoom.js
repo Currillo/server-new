@@ -17,6 +17,10 @@ class GameRoom {
       [player2.id]: { ...player2, team: 'ENEMY' } 
     };
 
+    // Store explicit references to who is who for orientation
+    this.player1Id = player1.id; // Bottom Player
+    this.player2Id = player2.id; // Top Player
+
     // P1 is "Bottom" (y=0..16 visually for them), P2 is "Top"
     // Server coordinates are absolute 0..32.
     // P1 Base at y=0, P2 Base at y=32.
@@ -74,6 +78,8 @@ class GameRoom {
     console.log(`[Room ${this.roomId}] Game Loop Started`);
     this.io.to(this.roomId).emit('game_start', { 
       players: this.players,
+      player1Id: this.player1Id,
+      player2Id: this.player2Id,
       endTime: Date.now() + 180000
     });
     
@@ -179,14 +185,10 @@ class GameRoom {
         }
     } else {
         // No target? Move towards enemy King Tower end
-        ent.state = 'MOVE';
         // Player 1 (Bottom, ID in players[0] key usually) -> goes to Y=32
         // Player 2 (Top) -> goes to Y=0
         
-        // Determine if we are "Player 1" (Bottom) or "Player 2" (Top)
-        // We can check y start position or ID order. 
-        // Simplest: If ownerId is the first key in players, they are P1 (Bottom).
-        const isPlayer1 = ent.ownerId === Object.keys(this.players)[0];
+        const isPlayer1 = ent.ownerId === this.player1Id;
         
         const bridgeY = ARENA_HEIGHT / 2;
         const targetY = isPlayer1 ? ARENA_HEIGHT - 2.5 : 2.5;
@@ -313,7 +315,10 @@ class GameRoom {
       }
 
       // Validate Side
-      const isPlayer1 = playerId === Object.keys(this.players)[0];
+      // P1 (Bottom) must spawn in bottom half (y < 16)
+      // P2 (Top) must spawn in top half (y > 16)
+      
+      const isPlayer1 = playerId === this.player1Id;
       const bridgeY = ARENA_HEIGHT / 2;
       
       if (card.type !== 'SPELL') {
