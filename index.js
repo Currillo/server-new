@@ -6,14 +6,14 @@ const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 
 // Modules
-const { handleMatchmaking, getRoomBySocketId, cleanupUser } = require('./socket/matchmaking');
+const { handleMatchmaking, getRoomByUserId, cleanupUser } = require('./socket/matchmaking');
 const GameRoom = require('./socket/gameRoom'); // Import directly for friendly battles
 const { CARDS } = require('./gameData');
 
 // --- In-Memory Database ---
 const USERS = {}; // id -> UserProfile
 const CLANS = {}; // id -> Clan object
-const ROOMS = {}; // roomId -> GameRoom (Shared with matchmaking)
+const ROOMS = {}; // roomId -> GameRoom (Friendly battles stored here, matchmaking has its own)
 
 // Initialize
 const app = express();
@@ -28,6 +28,7 @@ app.post('/api/auth/register', (req, res) => {
     const { username } = req.body;
     const id = uuidv4();
     
+    // Default Starter Cards
     const starterCards = Object.keys(CARDS).map(key => ({
         id: key, 
         level: 1, 
@@ -106,13 +107,14 @@ const io = new Server(server, {
   pingTimeout: 60000
 });
 
+// Middleware to attach user
 io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     const user = USERS[token];
     if (user) {
         socket.user = user;
-        // Associate socket ID with user for direct messaging
-        user.socketId = socket.id;
+        // Important: Update the socket ID on the master record immediately
+        user.socketId = socket.id; 
         next();
     } else {
         next(new Error("Authentication error"));
@@ -120,26 +122,26 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
-    console.log(`✅ Conectado: ${socket.user.username}`);
-    USERS[socket.user.id].socketId = socket.id; // Ensure latest socket ID
+    console.log(`✅ Conectado: ${socket.user.username} (${socket.id})`);
+    
+    // Update live socket mapping
+    USERS[socket.user.id].socketId = socket.id;
 
-    // Broadcast online status to friends
+    // Notify friends that user is online
     notifyFriendsStatus(socket.user.id, true);
 
     // --- Friends Logic ---
 
     socket.on('send_friend_request', ({ targetUsername }) => {
-        console.log(`[FriendRequest] Attempt from '${socket.user.username}' to '${targetUsername}'`);
+        console.log(`[FriendRequest] From: ${socket.user.username} To: ${targetUsername}`);
         
         const target = Object.values(USERS).find(u => u.username === targetUsername || u.name === targetUsername);
         
         if (!target) {
-            console.log(`[FriendRequest] Target '${targetUsername}' not found.`);
+            console.log(`[FriendRequest] Failed: Target '${targetUsername}' not found.`);
             socket.emit('error', 'User not found');
             return;
         }
-        
-        console.log(`[FriendRequest] Target found: ${target.username} (ID: ${target.id})`);
 
         if (target.id === socket.user.id) {
             socket.emit('error', 'Cannot add yourself');
@@ -154,30 +156,30 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // Add request
+        // 1. Add request to database
         target.friendRequests.push({
             fromId: socket.user.id,
             fromName: socket.user.name
         });
+        console.log(`[FriendRequest] Added to DB for ${target.username}. Current Requests: ${target.friendRequests.length}`);
 
-        // Notify target if online
-        // Check if we have a valid socket ID and if that socket is actually connected
+        // 2. Real-time Notification
         if (target.socketId) {
+            // Check if socket is actually connected
             const targetSocket = io.sockets.sockets.get(target.socketId);
-            
             if (targetSocket) {
                 targetSocket.emit('friend_request_received', { 
                     fromId: socket.user.id, 
                     fromName: socket.user.name 
                 });
-                // Update their profile data view
+                // Force profile update to show badge
                 targetSocket.emit('profile_update', target);
-                console.log(`[FriendRequest] Notification sent to ${target.username} at socket ${target.socketId}`);
+                console.log(`[FriendRequest] Notification SENT to socket ${target.socketId}`);
             } else {
-                console.log(`[FriendRequest] Target ${target.username} has stale socketId. Saved to DB only.`);
+                console.log(`[FriendRequest] Target socket ${target.socketId} not found in active sockets.`);
             }
         } else {
-            console.log(`[FriendRequest] Target ${target.username} is offline. Saved to DB.`);
+            console.log(`[FriendRequest] Target ${target.username} has no socketId (Offline).`);
         }
 
         socket.emit('success', `Request sent to ${target.name}`);
@@ -187,18 +189,21 @@ io.on('connection', (socket) => {
         const user = USERS[socket.user.id];
         const requester = USERS[requesterId];
 
+        console.log(`[FriendRequest] ${user.username} accepting ${requester ? requester.username : requesterId}`);
+
         // Remove request
         user.friendRequests = user.friendRequests.filter(r => r.fromId !== requesterId);
         
         if (requester) {
-            // Add to friends lists
+            // Add mutual friendship
             if (!user.friends.includes(requesterId)) user.friends.push(requesterId);
             if (!requester.friends.includes(user.id)) requester.friends.push(user.id);
 
-            // Notify both
+            // Notify User
             socket.emit('profile_update', user);
             socket.emit('friend_added', { id: requester.id, name: requester.name, isOnline: !!requester.socketId });
 
+            // Notify Requester
             if (requester.socketId) {
                 const reqSocket = io.sockets.sockets.get(requester.socketId);
                 if (reqSocket) {
@@ -207,7 +212,7 @@ io.on('connection', (socket) => {
                 }
             }
         } else {
-             socket.emit('profile_update', user); // Just update removal
+             socket.emit('profile_update', user); 
         }
     });
 
@@ -221,7 +226,6 @@ io.on('connection', (socket) => {
         const friendsData = socket.user.friends.map(fid => {
             const friend = USERS[fid];
             if (!friend) return null;
-            // Check if socket is active in io.sockets
             const isOnline = friend.socketId && io.sockets.sockets.get(friend.socketId);
             return {
                 id: friend.id,
@@ -230,6 +234,11 @@ io.on('connection', (socket) => {
             };
         }).filter(f => f);
         socket.emit('friends_status', friendsData);
+    });
+
+    // Explicit profile refresh for clients
+    socket.on('refresh_profile', () => {
+        socket.emit('profile_update', USERS[socket.user.id]);
     });
 
     // --- Friendly Battle Logic ---
@@ -251,8 +260,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('accept_friendly_battle', ({ inviterId }) => {
-        const p1 = USERS[inviterId];
-        const p2 = socket.user;
+        const p1 = USERS[inviterId]; // Inviter
+        const p2 = USERS[socket.user.id]; // Acceptor
 
         if (!p1 || !p1.socketId || !io.sockets.sockets.get(p1.socketId)) {
             socket.emit('error', 'Inviter is no longer available');
@@ -262,19 +271,18 @@ io.on('connection', (socket) => {
         // Create Friendly Room
         const roomId = uuidv4();
         const room = new GameRoom(roomId, p1, p2, io);
-        ROOMS[roomId] = room; // Store globally if needed for cleanup, though matchmaking handles its own
+        ROOMS[roomId] = room; // Store in friendly list
         
         // Join Sockets
         const s1 = io.sockets.sockets.get(p1.socketId);
-        const s2 = socket; // Current socket
+        const s2 = socket; 
 
         s1.join(roomId);
         s2.join(roomId);
 
-        // Start Game with FRIENDLY flag
-        // We override the start method or emit a specific payload
-        console.log(`⚔️ Friendly Battle: ${p1.name} vs ${p2.name}`);
+        console.log(`⚔️ Friendly Battle Started: ${p1.name} vs ${p2.name} (Room: ${roomId})`);
         
+        // Broadcast Start
         io.to(roomId).emit('game_start', { 
             players: { 
                 [p1.id]: { ...p1, team: 'PLAYER' }, 
@@ -431,24 +439,32 @@ io.on('connection', (socket) => {
 
     // --- Gameplay ---
     socket.on('join_queue', () => {
-        handleMatchmaking(io, socket, socket.user);
+        handleMatchmaking(io, socket, USERS[socket.user.id]);
     });
 
     socket.on('game_input', (data) => {
-        const room = getRoomBySocketId(socket.id);
+        // Robust Room Lookup: Check matchmaking rooms first, then friendly rooms
+        // We use User ID, not Socket ID, for stability
+        const userId = socket.user.id;
+        
+        let room = getRoomByUserId(userId);
+        
+        if (!room) {
+             // Check friendly rooms
+             room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(userId));
+        }
+
         if (room) {
-            room.handleInput(socket.user.id, data);
+            room.handleInput(userId, data);
         } else {
-             // Check if it's a friendly room in global ROOMS
-             const friendlyRoom = Object.values(ROOMS).find(r => Object.keys(r.players).includes(socket.user.id));
-             if (friendlyRoom) friendlyRoom.handleInput(socket.user.id, data);
+            console.warn(`[GameInput] No room found for user ${userId}`);
         }
     });
 
     socket.on('disconnect', () => {
-        console.log(`❌ Desconectado: ${socket.user.username}`);
+        console.log(`❌ Desconectado: ${socket.user.username} (${socket.id})`);
         notifyFriendsStatus(socket.user.id, false);
-        cleanupUser(socket.id);
+        cleanupUser(socket.user.id, socket.id);
     });
 });
 
