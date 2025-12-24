@@ -129,12 +129,18 @@ io.on('connection', (socket) => {
     // --- Friends Logic ---
 
     socket.on('send_friend_request', ({ targetUsername }) => {
+        console.log(`[FriendRequest] Attempt from '${socket.user.username}' to '${targetUsername}'`);
+        
         const target = Object.values(USERS).find(u => u.username === targetUsername || u.name === targetUsername);
         
         if (!target) {
+            console.log(`[FriendRequest] Target '${targetUsername}' not found.`);
             socket.emit('error', 'User not found');
             return;
         }
+        
+        console.log(`[FriendRequest] Target found: ${target.username} (ID: ${target.id})`);
+
         if (target.id === socket.user.id) {
             socket.emit('error', 'Cannot add yourself');
             return;
@@ -155,13 +161,23 @@ io.on('connection', (socket) => {
         });
 
         // Notify target if online
+        // Check if we have a valid socket ID and if that socket is actually connected
         if (target.socketId) {
-            io.to(target.socketId).emit('friend_request_received', { 
-                fromId: socket.user.id, 
-                fromName: socket.user.name 
-            });
-            // Update their profile data view
-            io.to(target.socketId).emit('profile_update', target);
+            const targetSocket = io.sockets.sockets.get(target.socketId);
+            
+            if (targetSocket) {
+                targetSocket.emit('friend_request_received', { 
+                    fromId: socket.user.id, 
+                    fromName: socket.user.name 
+                });
+                // Update their profile data view
+                targetSocket.emit('profile_update', target);
+                console.log(`[FriendRequest] Notification sent to ${target.username} at socket ${target.socketId}`);
+            } else {
+                console.log(`[FriendRequest] Target ${target.username} has stale socketId. Saved to DB only.`);
+            }
+        } else {
+            console.log(`[FriendRequest] Target ${target.username} is offline. Saved to DB.`);
         }
 
         socket.emit('success', `Request sent to ${target.name}`);
@@ -184,8 +200,11 @@ io.on('connection', (socket) => {
             socket.emit('friend_added', { id: requester.id, name: requester.name, isOnline: !!requester.socketId });
 
             if (requester.socketId) {
-                io.to(requester.socketId).emit('profile_update', requester);
-                io.to(requester.socketId).emit('friend_added', { id: user.id, name: user.name, isOnline: true });
+                const reqSocket = io.sockets.sockets.get(requester.socketId);
+                if (reqSocket) {
+                    reqSocket.emit('profile_update', requester);
+                    reqSocket.emit('friend_added', { id: user.id, name: user.name, isOnline: true });
+                }
             }
         } else {
              socket.emit('profile_update', user); // Just update removal
@@ -221,7 +240,7 @@ io.on('connection', (socket) => {
         
         const friendSocket = friend.socketId && io.sockets.sockets.get(friend.socketId);
         if (friendSocket) {
-            io.to(friend.socketId).emit('friendly_invite', {
+            friendSocket.emit('friendly_invite', {
                 inviterId: socket.user.id,
                 inviterName: socket.user.name
             });
@@ -270,8 +289,9 @@ io.on('connection', (socket) => {
 
     socket.on('reject_friendly_battle', ({ inviterId }) => {
          const inviter = USERS[inviterId];
-         if (inviter && inviter.socketId) {
-             io.to(inviter.socketId).emit('error', `${socket.user.name} declined your invite.`);
+         const invSocket = inviter?.socketId && io.sockets.sockets.get(inviter.socketId);
+         if (invSocket) {
+             invSocket.emit('error', `${socket.user.name} declined your invite.`);
          }
     });
 
@@ -439,7 +459,10 @@ function notifyFriendsStatus(userId, isOnline) {
     user.friends.forEach(fid => {
         const friend = USERS[fid];
         if (friend && friend.socketId) {
-            io.to(friend.socketId).emit('friend_status_update', { id: userId, isOnline });
+            const friendSocket = io.sockets.sockets.get(friend.socketId);
+            if(friendSocket) {
+                friendSocket.emit('friend_status_update', { id: userId, isOnline });
+            }
         }
     });
 }
