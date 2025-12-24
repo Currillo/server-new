@@ -1,3 +1,4 @@
+
 const { v4: uuidv4 } = require('uuid');
 const { CARDS, ARENA_WIDTH, ARENA_HEIGHT } = require('../gameData');
 
@@ -17,8 +18,8 @@ class GameRoom {
     };
 
     // P1 is "Bottom" (y=0..16 visually for them), P2 is "Top"
-    // However, server coordinates are absolute 0..32.
-    // P1 Base is at y=0, P2 Base is at y=32.
+    // Server coordinates are absolute 0..32.
+    // P1 Base at y=0, P2 Base at y=32.
     
     this.gameState = {
       time: 180, // 3 minutes
@@ -37,7 +38,6 @@ class GameRoom {
   }
 
   spawnTowers(playerId, side) {
-    // In Server coords: 0 is Bottom, 32 is Top
     const yPrincess = side === 'BOTTOM' ? 6.5 : ARENA_HEIGHT - 6.5;
     const yKing = side === 'BOTTOM' ? 2.5 : ARENA_HEIGHT - 2.5;
 
@@ -50,7 +50,10 @@ class GameRoom {
 
   createEntity(defId, ownerId, pos) {
     const def = CARDS[defId];
-    if (!def) return null;
+    if (!def) {
+        console.error(`[GameRoom] Invalid Card ID: ${defId}`);
+        return null;
+    }
 
     return {
       id: uuidv4(),
@@ -68,7 +71,7 @@ class GameRoom {
   }
 
   start() {
-    console.log(`[Room ${this.roomId}] Game Started`);
+    console.log(`[Room ${this.roomId}] Game Loop Started`);
     this.io.to(this.roomId).emit('game_start', { 
       players: this.players,
       endTime: Date.now() + 180000
@@ -90,7 +93,7 @@ class GameRoom {
     // 1. Time & Elixir
     this.gameState.time -= dt;
     if (this.gameState.time <= 0) {
-        this.endGame('DRAW'); // Or Sudden death logic
+        this.endGame('DRAW');
         return;
     }
 
@@ -103,9 +106,15 @@ class GameRoom {
     this.updateProjectiles(dt);
 
     // 3. Entities
-    // Filter dead entities first? No, update them then remove
     for (let i = this.gameState.entities.length - 1; i >= 0; i--) {
         const ent = this.gameState.entities[i];
+        
+        // Safety: ensure entity def still exists (shouldn't happen but prevents crashes)
+        if (!CARDS[ent.defId]) {
+            this.gameState.entities.splice(i, 1);
+            continue;
+        }
+
         this.updateEntity(ent, dt);
         
         if (ent.hp <= 0) {
@@ -171,16 +180,21 @@ class GameRoom {
     } else {
         // No target? Move towards enemy King Tower end
         ent.state = 'MOVE';
-        // Player 1 (Bottom) goes to Y=32, Player 2 (Top) goes to Y=0
+        // Player 1 (Bottom, ID in players[0] key usually) -> goes to Y=32
+        // Player 2 (Top) -> goes to Y=0
+        
+        // Determine if we are "Player 1" (Bottom) or "Player 2" (Top)
+        // We can check y start position or ID order. 
+        // Simplest: If ownerId is the first key in players, they are P1 (Bottom).
         const isPlayer1 = ent.ownerId === Object.keys(this.players)[0];
+        
         const bridgeY = ARENA_HEIGHT / 2;
         const targetY = isPlayer1 ? ARENA_HEIGHT - 2.5 : 2.5;
 
-        // Bridge Logic (Simple)
+        // Bridge Logic
         const needsBridge = isPlayer1 ? ent.position.y < bridgeY : ent.position.y > bridgeY;
         
         if (needsBridge) {
-             // Go to nearest bridge
              const isLeft = ent.position.x < ARENA_WIDTH / 2;
              const bridgeX = isLeft ? 3.5 : ARENA_WIDTH - 3.5;
              this.moveTowards(ent, { x: bridgeX, y: bridgeY }, def.stats.speed, dt);
@@ -204,7 +218,6 @@ class GameRoom {
   }
 
   findTarget(me, stats) {
-      // Simple loop to find nearest enemy
       let nearest = null;
       let minDstSq = Infinity;
 
@@ -228,7 +241,7 @@ class GameRoom {
               id: uuidv4(),
               ownerId: source.ownerId,
               targetId: target.id,
-              targetPos: { ...target.position }, // Snapshot position
+              targetPos: { ...target.position },
               damage: stats.damage,
               speed: 12,
               position: { ...source.position },
@@ -237,7 +250,6 @@ class GameRoom {
       } else {
           // Instant Melee
           if (stats.splashRadius > 0) {
-              // Splash Area
               this.gameState.entities.forEach(e => {
                   if (e.ownerId !== source.ownerId) {
                       const d2 = (e.position.x - source.position.x)**2 + (e.position.y - source.position.y)**2;
@@ -256,7 +268,6 @@ class GameRoom {
       for (let i = this.gameState.projectiles.length - 1; i >= 0; i--) {
           const p = this.gameState.projectiles[i];
           
-          // Homing logic if target exists
           if (p.targetId) {
               const target = this.gameState.entities.find(e => e.id === p.targetId);
               if (target) p.targetPos = target.position;
@@ -267,7 +278,6 @@ class GameRoom {
           const dist = Math.sqrt(dx*dx + dy*dy);
 
           if (dist < 0.5) {
-              // Impact
               if (p.splashRadius > 0) {
                   this.gameState.entities.forEach(e => {
                     if (e.ownerId !== p.ownerId) {
@@ -292,20 +302,27 @@ class GameRoom {
       if (this.gameState.gameOver) return;
 
       const card = CARDS[cardId];
-      if (!card) return;
-      if (this.gameState.elixir[playerId] < card.cost) return;
+      if (!card) {
+          console.log(`[GameRoom] Player ${playerId} tried to spawn invalid card ${cardId}`);
+          return;
+      }
+      
+      // Allow slight floating point tolerance for Elixir
+      if (this.gameState.elixir[playerId] < card.cost - 0.1) {
+          return;
+      }
 
-      // Validate Placement Side
+      // Validate Side
       const isPlayer1 = playerId === Object.keys(this.players)[0];
       const bridgeY = ARENA_HEIGHT / 2;
       
-      // P1 can only place bottom, P2 top. Spells anywhere.
       if (card.type !== 'SPELL') {
           if (isPlayer1 && y > bridgeY) return;
           if (!isPlayer1 && y < bridgeY) return;
       }
 
       this.gameState.elixir[playerId] -= card.cost;
+      console.log(`[GameRoom] Spawning ${cardId} for ${playerId} at ${x.toFixed(1)}, ${y.toFixed(1)}`);
 
       if (card.type === 'SPELL') {
           this.gameState.projectiles.push({
@@ -319,7 +336,6 @@ class GameRoom {
               splashRadius: card.stats.range
           });
       } else {
-          // Spawn Units
           const count = card.stats.count || 1;
           const offsets = this.getSpawnOffsets(count);
           
@@ -338,10 +354,13 @@ class GameRoom {
   }
 
   endGame(winnerId) {
+      if (this.gameState.gameOver) return;
+      
       this.gameState.gameOver = true;
       this.gameState.winner = winnerId;
       this.io.to(this.roomId).emit('game_over', { winnerId });
       console.log(`[Room ${this.roomId}] Game Over. Winner: ${winnerId}`);
+      
       clearInterval(this.intervalId);
   }
 }
