@@ -414,7 +414,18 @@ io.on('connection', (socket) => {
     });
 
     socket.on('create_clan', ({ name, description }) => {
-        if (socket.user.clanId) return;
+        console.log(`[Clan] Request to create clan '${name}' from ${socket.user.username}`);
+
+        if (!name || name.trim().length < 3) {
+             socket.emit('error', 'Clan name must be 3+ chars');
+             return;
+        }
+
+        if (socket.user.clanId) {
+            socket.emit('error', 'You are already in a clan');
+            return;
+        }
+        
         if (Object.values(CLANS).find(c => c.name === name)) {
             socket.emit('error', 'Clan name taken');
             return;
@@ -430,25 +441,49 @@ io.on('connection', (socket) => {
         };
 
         CLANS[clanId] = newClan;
+        
+        // IMPORTANT: Update Server Memory
         socket.user.clanId = clanId;
-        USERS[socket.user.id].clanId = clanId;
+        if (USERS[socket.user.id]) {
+            USERS[socket.user.id].clanId = clanId;
+        }
 
         socket.join(clanId);
+        
+        // Notify Creator
         socket.emit('clan_joined', newClan);
-        io.emit('clan_list_update');
+        socket.emit('success', `Clan '${name}' created!`);
+        
+        console.log(`[Clan] Clan created: ${name} (${clanId}). Leader: ${socket.user.username}`);
+
+        // Broadcast list update to everyone
+        io.emit('clan_list', Object.values(CLANS).map(c => ({
+            id: c.id,
+            name: c.name,
+            description: c.description,
+            memberCount: c.members.length
+        })));
     });
 
     socket.on('join_clan', ({ clanId }) => {
         const clan = CLANS[clanId];
         if (!clan) return;
-        if (socket.user.clanId) return; 
+        if (socket.user.clanId) {
+            socket.emit('error', 'You are already in a clan');
+            return;
+        } 
 
         clan.members.push(socket.user.id);
+        
+        // Update Server Memory
         socket.user.clanId = clanId;
-        USERS[socket.user.id].clanId = clanId;
+        if (USERS[socket.user.id]) {
+            USERS[socket.user.id].clanId = clanId;
+        }
 
         socket.join(clanId);
         socket.emit('clan_joined', clan);
+        socket.emit('success', 'Joined clan!');
         
         const sysMsg = {
             id: uuidv4(),
@@ -460,6 +495,14 @@ io.on('connection', (socket) => {
         };
         clan.messages.push(sysMsg);
         io.to(clanId).emit('clan_message', sysMsg);
+        
+        // Broadcast list update (member count changed)
+        io.emit('clan_list', Object.values(CLANS).map(c => ({
+            id: c.id,
+            name: c.name,
+            description: c.description,
+            memberCount: c.members.length
+        })));
     });
 
     socket.on('leave_clan', () => {
@@ -469,11 +512,15 @@ io.on('connection', (socket) => {
         const clan = CLANS[clanId];
         clan.members = clan.members.filter(id => id !== socket.user.id);
         
+        // Update Server Memory
         socket.user.clanId = null;
-        USERS[socket.user.id].clanId = null;
+        if (USERS[socket.user.id]) {
+            USERS[socket.user.id].clanId = null;
+        }
+        
         socket.leave(clanId);
-
         socket.emit('clan_left');
+        socket.emit('success', 'Left clan');
 
         if (clan.members.length === 0) {
             delete CLANS[clanId];
@@ -489,6 +536,14 @@ io.on('connection', (socket) => {
             clan.messages.push(sysMsg);
             io.to(clanId).emit('clan_message', sysMsg);
         }
+        
+        // Broadcast list update
+        io.emit('clan_list', Object.values(CLANS).map(c => ({
+            id: c.id,
+            name: c.name,
+            description: c.description,
+            memberCount: c.members.length
+        })));
     });
 
     socket.on('send_clan_message', ({ content }) => {
