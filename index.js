@@ -615,6 +615,8 @@ io.on('connection', (socket) => {
 
         if (room) {
             room.handleInput(userId, data);
+        } else {
+            console.log(`[Server] Game Input Ignored: No room found for user ${userId}. (Is it a friendly match that failed lookup?)`);
         }
     });
 
@@ -623,9 +625,15 @@ io.on('connection', (socket) => {
         notifyFriendsStatus(socket.user.id, false);
         cleanupUser(socket.user.id, socket.id);
         
-        // Remove empty friendly rooms? 
-        // Logic: if friendly room has no connected players, delete it.
-        // For simplicity in this version, room cleans up on endGame or when both leave.
+        // Cleanup Friendly Rooms (Simple approach: if anyone leaves, room dies)
+        // In a real app you might handle reconnects.
+        Object.keys(ROOMS).forEach(roomId => {
+            const r = ROOMS[roomId];
+            if (r.players[socket.user.id]) {
+                console.log(`[Server] Cleaning up friendly room ${roomId} due to disconnect`);
+                delete ROOMS[roomId];
+            }
+        });
     });
 });
 
