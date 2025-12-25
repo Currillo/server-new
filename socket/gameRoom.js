@@ -73,6 +73,7 @@ class GameRoom {
       lastAttackTime: 0,
       deployTimer: def.stats.deployTime,
       deathTimer: 0,
+      stunTimer: 0,
       facingRight: true
     };
   }
@@ -133,6 +134,12 @@ class GameRoom {
             }
             continue; // Skip normal update logic for dying units
         }
+        
+        // Handle Stun
+        if (ent.stunTimer > 0) {
+            ent.stunTimer -= dt;
+            continue;
+        }
 
         this.updateEntity(ent, dt);
         
@@ -169,35 +176,45 @@ class GameRoom {
     if (def.type === 'BUILDING') return;
 
     // AI Logic: Find Target or Move
-    let target = null;
-    if (ent.targetId) {
-        target = this.gameState.entities.find(e => e.id === ent.targetId && e.state !== 'DYING');
-    }
+    let targets = this.findTargets(ent, def.stats, def.stats.maxTargets || 1);
     
-    if (!target || target.hp <= 0) {
-        ent.targetId = null;
-        target = this.findTarget(ent, def.stats);
-        if (target) ent.targetId = target.id;
+    // Check if current target is invalid
+    if (ent.targetId) {
+        const currentTarget = this.gameState.entities.find(e => e.id === ent.targetId && e.state !== 'DYING');
+        if (!currentTarget) ent.targetId = null;
     }
 
-    if (target) {
-        const dx = target.position.x - ent.position.x;
-        const dy = target.position.y - ent.position.y;
-        const distSq = dx*dx + dy*dy;
-        const range = def.stats.range + 0.5 + (CARDS[target.defId]?.stats?.radius || 0.5); 
+    if (!ent.targetId && targets.length > 0) {
+        ent.targetId = targets[0].id;
+    }
+
+    if (ent.targetId) {
+        // We have at least one target (the primary one)
+        const target = this.gameState.entities.find(e => e.id === ent.targetId);
         
-        if (distSq <= range * range) {
-            // Attack
-            ent.state = 'ATTACK';
-            ent.lastAttackTime += dt;
-            if (ent.lastAttackTime >= def.stats.hitSpeed) {
-                ent.lastAttackTime = 0;
-                this.performAttack(ent, target, def.stats);
+        if (target) {
+            const dx = target.position.x - ent.position.x;
+            const dy = target.position.y - ent.position.y;
+            const distSq = dx*dx + dy*dy;
+            const range = def.stats.range + 0.5 + (CARDS[target.defId]?.stats?.radius || 0.5); 
+            
+            if (distSq <= range * range) {
+                // Attack
+                ent.state = 'ATTACK';
+                ent.lastAttackTime += dt;
+                if (ent.lastAttackTime >= def.stats.hitSpeed) {
+                    ent.lastAttackTime = 0;
+                    
+                    // Attack ALL targets
+                    // Refresh targets list to be safe
+                    targets = this.findTargets(ent, def.stats, def.stats.maxTargets || 1);
+                    targets.forEach(t => this.performAttack(ent, t, def.stats));
+                }
+            } else {
+                // Move towards PRIMARY target
+                ent.state = 'MOVE';
+                this.moveTowards(ent, target.position, def.stats.speed, dt);
             }
-        } else {
-            // Move towards target
-            ent.state = 'MOVE';
-            this.moveTowards(ent, target.position, def.stats.speed, dt);
         }
     } else {
         // No target? Move towards enemy King Tower end
@@ -235,26 +252,26 @@ class GameRoom {
       }
   }
 
-  findTarget(me, stats) {
-      let nearest = null;
-      let minDstSq = Infinity;
+  findTargets(me, stats, count) {
+      let candidates = this.gameState.entities.filter(other => {
+          if (other.ownerId === me.ownerId) return false;
+          if (other.state === 'DYING') return false;
+          if (stats.targetPreference === 'BUILDINGS' && CARDS[other.defId].type !== 'BUILDING') return false;
+          return true;
+      });
 
-      for (const other of this.gameState.entities) {
-          if (other.ownerId === me.ownerId) continue;
-          if (other.state === 'DYING') continue;
-          if (stats.targetPreference === 'BUILDINGS' && CARDS[other.defId].type !== 'BUILDING') continue;
+      // Sort by distance
+      candidates.sort((a, b) => {
+          const d1 = (me.position.x - a.position.x)**2 + (me.position.y - a.position.y)**2;
+          const d2 = (me.position.x - b.position.x)**2 + (me.position.y - b.position.y)**2;
+          return d1 - d2;
+      });
 
-          const d2 = (me.position.x - other.position.x)**2 + (me.position.y - other.position.y)**2;
-          if (d2 < minDstSq) {
-              minDstSq = d2;
-              nearest = other;
-          }
-      }
-      return nearest;
+      return candidates.slice(0, count);
   }
 
   performAttack(source, target, stats) {
-      if (stats.range > 1.5) {
+      if (stats.range > 1.5 || stats.projectileType === 'BEAM') {
           // Projectile
           this.gameState.projectiles.push({
               id: uuidv4(),
@@ -262,9 +279,11 @@ class GameRoom {
               targetId: target.id,
               targetPos: { ...target.position },
               damage: stats.damage,
-              speed: 12,
+              speed: stats.projectileType === 'BEAM' ? 30 : 12,
               position: { ...source.position },
-              splashRadius: stats.splashRadius || 0
+              splashRadius: stats.splashRadius || 0,
+              type: stats.projectileType || 'STANDARD',
+              stunDuration: stats.stunDuration
           });
       } else {
           // Instant Melee
@@ -287,6 +306,45 @@ class GameRoom {
       for (let i = this.gameState.projectiles.length - 1; i >= 0; i--) {
           const p = this.gameState.projectiles[i];
           
+          if (p.type === 'LOG') {
+               // Log Logic
+               const dx = p.targetPos.x - p.position.x;
+               const dy = p.targetPos.y - p.position.y;
+               const distToTarget = Math.sqrt(dx*dx + dy*dy);
+               const move = p.speed * dt;
+               const dirX = dx / distToTarget;
+               const dirY = dy / distToTarget;
+               
+               p.position.x += dirX * move;
+               p.position.y += dirY * move;
+
+               // Collision
+               this.gameState.entities.forEach(e => {
+                   if (e.ownerId !== p.ownerId && e.hp > 0 && e.state !== 'DYING') {
+                       if (p.hitList && !p.hitList.includes(e.id)) {
+                            // Check collision
+                            const d2 = (e.position.x - p.position.x)**2 + (e.position.y - p.position.y)**2;
+                            if (d2 < (p.splashRadius)**2) {
+                                e.hp -= p.damage;
+                                p.hitList.push(e.id);
+                                if (p.knockback) {
+                                     e.position.x += dirX * p.knockback;
+                                     e.position.y += dirY * p.knockback;
+                                     e.position.x = Math.max(0, Math.min(ARENA_WIDTH, e.position.x));
+                                     e.position.y = Math.max(0, Math.min(ARENA_HEIGHT, e.position.y));
+                                }
+                            }
+                       }
+                   }
+               });
+               
+               const distTraveled = p.startPos ? Math.sqrt((p.position.x - p.startPos.x)**2 + (p.position.y - p.startPos.y)**2) : 999;
+               if (distTraveled >= (p.maxRange || 10)) {
+                   this.gameState.projectiles.splice(i, 1);
+               }
+               continue;
+          }
+
           if (p.targetId) {
               const target = this.gameState.entities.find(e => e.id === p.targetId);
               if (target) p.targetPos = target.position;
@@ -301,12 +359,25 @@ class GameRoom {
                   this.gameState.entities.forEach(e => {
                     if (e.ownerId !== p.ownerId && e.state !== 'DYING') {
                         const d2 = (e.position.x - p.targetPos.x)**2 + (e.position.y - p.targetPos.y)**2;
-                        if (d2 <= p.splashRadius**2) e.hp -= p.damage;
+                        if (d2 <= p.splashRadius**2) {
+                            e.hp -= p.damage;
+                            if (p.stunDuration) e.stunTimer = p.stunDuration;
+                            if (p.knockback) {
+                                const pushX = e.position.x - p.targetPos.x;
+                                const pushY = e.position.y - p.targetPos.y;
+                                const pushLen = Math.sqrt(pushX*pushX + pushY*pushY) || 1;
+                                e.position.x += (pushX/pushLen) * p.knockback;
+                                e.position.y += (pushY/pushLen) * p.knockback;
+                            }
+                        }
                     }
                   });
               } else if (p.targetId) {
                   const target = this.gameState.entities.find(e => e.id === p.targetId);
-                  if (target) target.hp -= p.damage;
+                  if (target) {
+                      target.hp -= p.damage;
+                      if (p.stunDuration) target.stunTimer = p.stunDuration;
+                  }
               }
               this.gameState.projectiles.splice(i, 1);
           } else {
@@ -317,31 +388,48 @@ class GameRoom {
       }
   }
 
-  handleInput(playerId, { cardId, x, y }) {
+  handleInput(playerId, { cardId, x, y }, bypassCost = false) {
       if (this.gameState.gameOver) return;
 
       const card = CARDS[cardId];
-      if (!card) {
-          console.log(`[GameRoom] Player ${playerId} tried to spawn invalid card ${cardId}`);
-          return;
-      }
+      if (!card) return;
       
       // Allow slight floating point tolerance for Elixir
-      if (this.gameState.elixir[playerId] < card.cost - 0.1) {
-          return;
-      }
+      if (!bypassCost && this.gameState.elixir[playerId] < card.cost - 0.1) return;
 
-      // Validate Side
+      // Validate Side (skip validation if admin spawn)
       const isPlayer1 = playerId === this.player1Id;
       const bridgeY = ARENA_HEIGHT / 2;
       
-      if (card.type !== 'SPELL') {
+      if (!bypassCost && card.type !== 'SPELL' && card.stats.projectileType !== 'LOG') {
           if (isPlayer1 && y > bridgeY) return;
           if (!isPlayer1 && y < bridgeY) return;
       }
 
-      this.gameState.elixir[playerId] -= card.cost;
-      console.log(`[GameRoom] Spawning ${cardId} for ${playerId} at ${x.toFixed(1)}, ${y.toFixed(1)}`);
+      if (!bypassCost) {
+          this.gameState.elixir[playerId] -= card.cost;
+      }
+
+      // SPecial LOG Logic
+      if (card.stats.projectileType === 'LOG') {
+          this.gameState.projectiles.push({
+            id: uuidv4(),
+            ownerId: playerId,
+            targetId: null, // Log doesn't target an entity, it targets a direction
+            targetPos: { x, y: y + (isPlayer1 ? 10 : -10) }, // Move forward
+            damage: card.stats.damage,
+            speed: card.stats.speed,
+            position: { x, y }, 
+            splashRadius: card.stats.splashRadius || 1.0,
+            type: 'LOG',
+            knockback: card.stats.knockback || 2.0,
+            piercing: true,
+            hitList: [],
+            maxRange: card.stats.range,
+            startPos: { x, y }
+          });
+          return;
+      }
 
       if (card.type === 'SPELL') {
           this.gameState.projectiles.push({
@@ -352,7 +440,10 @@ class GameRoom {
               damage: card.stats.damage,
               speed: 15,
               position: { x, y: isPlayer1 ? 0 : ARENA_HEIGHT },
-              splashRadius: card.stats.range
+              splashRadius: card.stats.range,
+              type: card.stats.projectileType || 'FIREBALL',
+              stunDuration: card.stats.stunDuration,
+              knockback: card.stats.knockback
           });
       } else {
           const count = card.stats.count || 1;
@@ -360,7 +451,39 @@ class GameRoom {
           
           offsets.forEach(off => {
               const ent = this.createEntity(cardId, playerId, { x: x + off.x, y: y + off.y });
-              if (ent) this.gameState.entities.push(ent);
+              
+              if (bypassCost) {
+                  ent.deployTimer = 0; // Instant deploy for admin spawns
+                  ent.state = 'IDLE';
+              }
+
+              if (ent) {
+                  this.gameState.entities.push(ent);
+
+                  // Spawn Damage (E-Wiz)
+                  if (card.stats.spawnDamage) {
+                       const radius = card.stats.splashRadius || 2;
+                        this.gameState.entities.forEach(target => {
+                            if (target.ownerId !== playerId && target.hp > 0 && 
+                                ((ent.position.x - target.position.x)**2 + (ent.position.y - target.position.y)**2 <= radius**2)) {
+                                target.hp -= card.stats.spawnDamage;
+                                if (card.stats.stunDuration) target.stunTimer = card.stats.stunDuration;
+                            }
+                        });
+                        // Visual
+                        this.gameState.projectiles.push({
+                            id: uuidv4(),
+                            ownerId: playerId,
+                            targetId: null,
+                            targetPos: ent.position,
+                            damage: 0,
+                            speed: 0,
+                            position: ent.position,
+                            splashRadius: 0,
+                            type: 'ZAP'
+                        });
+                  }
+              }
           });
       }
   }
