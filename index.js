@@ -318,13 +318,9 @@ io.on('connection', (socket) => {
         }
         
         let room = getRoomByUserId(adminId);
-        if (!room) {
-            // Check friendly rooms
-            room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(adminId));
+        if (!room && targetUser) {
             // Check if looking for room of target user
-            if (!room && targetUser) {
-                room = getRoomByUserId(targetUser.id) || Object.values(ROOMS).find(r => Object.keys(r.players).includes(targetUser.id));
-            }
+            room = getRoomByUserId(targetUser.id) || Object.values(ROOMS).find(r => Object.keys(r.players).includes(targetUser.id));
         }
 
         switch(action) {
@@ -355,7 +351,15 @@ io.on('connection', (socket) => {
 
             case 'GET_PLAYER_DETAILS':
                 if (targetUser) {
-                    socket.emit('admin_data', { type: 'PLAYER_DETAILS', payload: targetUser });
+                    // Combine profile with live stats if in match
+                    let liveStats = null;
+                    if (room) {
+                        liveStats = room.getLiveStats(targetUser.id);
+                    }
+                    socket.emit('admin_data', { 
+                        type: 'PLAYER_DETAILS', 
+                        payload: { ...targetUser, liveStats } 
+                    });
                 }
                 break;
 
@@ -477,6 +481,22 @@ io.on('connection', (socket) => {
                 }
                 break;
 
+            case 'REMOVE_CARD':
+                if (targetUser && payload.cardId && payload.count) {
+                    const cardId = payload.cardId;
+                    const count = payload.count;
+                    if (targetUser.ownedCards[cardId]) {
+                        targetUser.ownedCards[cardId].count = Math.max(0, targetUser.ownedCards[cardId].count - count);
+                        logUserActivity(targetUser.id, 'REMOVE_CARD', `Removed ${count}x ${cardId}`);
+                        if (targetUser.socketId) {
+                            const ts = io.sockets.sockets.get(targetUser.socketId);
+                            if (ts) ts.emit('profile_update', targetUser);
+                        }
+                        socket.emit('admin_data', { type: 'LOG', payload: `Removed ${count} x ${cardId} from ${targetUser.username}` });
+                    }
+                }
+                break;
+
             case 'UNLOCK_ALL_CARDS':
                 if (targetUser) {
                     Object.keys(CARDS).forEach(cardId => {
@@ -525,6 +545,24 @@ io.on('connection', (socket) => {
                         if (ts) ts.emit('profile_update', targetUser);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Instant opened chests for ${targetUser.username}` });
+                }
+                break;
+
+            case 'RESET_CHEST_TIMERS':
+                if (targetUser) {
+                    let count = 0;
+                    targetUser.chests.forEach(c => {
+                        if (c.status === 'UNLOCKING') {
+                            c.status = 'LOCKED';
+                            c.unlockFinishTime = null;
+                            count++;
+                        }
+                    });
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Reset ${count} chest timers for ${targetUser.username}` });
                 }
                 break;
 
