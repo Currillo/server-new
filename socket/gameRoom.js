@@ -5,6 +5,7 @@ const { CARDS, ARENA_WIDTH, ARENA_HEIGHT } = require('../gameData');
 const TICK_RATE = 30; // 30 FPS
 const ELIXIR_RATE = 2.8;
 const MAX_ELIXIR = 10;
+const INTRO_DELAY_MS = 4000; // 4 seconds delay for client intro animation
 
 class GameRoom {
   constructor(roomId, player1, player2, io, onMatchEnd) {
@@ -172,16 +173,22 @@ class GameRoom {
   }
 
   start() {
-    console.log(`[Room ${this.roomId}] Game Loop Started`);
+    console.log(`[Room ${this.roomId}] Initializing...`);
+    // Notify clients match found, they play Intro animation
     this.io.to(this.roomId).emit('game_start', { 
       players: this.players,
       player1Id: this.player1Id,
       player2Id: this.player2Id,
-      endTime: Date.now() + 180000,
+      endTime: Date.now() + 180000 + INTRO_DELAY_MS,
       isFriendly: this.isFriendly
     });
     
-    this.intervalId = setInterval(() => this.update(), 1000 / TICK_RATE);
+    // Wait for intro to finish before starting simulation
+    setTimeout(() => {
+        console.log(`[Room ${this.roomId}] Game Loop Started`);
+        this.lastTime = Date.now(); // Reset time anchor
+        this.intervalId = setInterval(() => this.update(), 1000 / TICK_RATE);
+    }, INTRO_DELAY_MS);
   }
 
   update() {
@@ -494,6 +501,29 @@ class GameRoom {
           const dist = Math.sqrt(dx*dx + dy*dy);
 
           if (dist < 0.5) {
+              // HIT EVENT
+              
+              // Goblin Barrel Spawn Logic
+              if (p.type === 'BARREL' && p.spawnUnitId) {
+                  const count = p.spawnCount || 3;
+                  const offsets = [
+                      {x: 0, y: -0.8}, {x: -0.7, y: 0.4}, {x: 0.7, y: 0.4}
+                  ];
+                  for (let k = 0; k < count; k++) {
+                      const offset = offsets[k % 3];
+                      const ent = this.createEntity(p.spawnUnitId, p.ownerId, { 
+                          x: p.targetPos.x + offset.x, 
+                          y: p.targetPos.y + offset.y 
+                      });
+                      if(ent) {
+                          ent.deployTimer = 0.5;
+                          this.gameState.entities.push(ent);
+                      }
+                  }
+                  this.gameState.projectiles.splice(i, 1);
+                  continue;
+              }
+
               if (p.splashRadius > 0) {
                   this.gameState.entities.forEach(e => {
                     if (e.ownerId !== p.ownerId && e.state !== 'DYING') {
@@ -523,6 +553,13 @@ class GameRoom {
               const move = p.speed * dt;
               p.position.x += (dx/dist) * move;
               p.position.y += (dy/dist) * move;
+              
+              // Calc Progress
+              if (p.startPos) {
+                  const totalDist = Math.sqrt((p.startPos.x - p.targetPos.x)**2 + (p.startPos.y - p.targetPos.y)**2) || 1;
+                  const distTraveled = Math.sqrt((p.startPos.x - p.position.x)**2 + (p.startPos.y - p.position.y)**2);
+                  p.progress = Math.min(1, Math.max(0, distTraveled / totalDist));
+              }
           }
       }
   }
@@ -591,6 +628,28 @@ class GameRoom {
           return;
       }
 
+      // Goblin Barrel Projectile Logic
+      if (cardId === 'goblin_barrel') {
+          this.gameState.projectiles.push({
+              id: uuidv4(),
+              ownerId: playerId,
+              sourceId: 'king_tower',
+              targetId: null,
+              targetPos: { x, y },
+              damage: 0,
+              speed: 15,
+              position: { x, y: isPlayer1 ? 0 : ARENA_HEIGHT },
+              team: 'PLAYER', // Used for visualization if needed, mapped by ID usually
+              splashRadius: 1.5,
+              progress: 0,
+              type: 'BARREL',
+              spawnUnitId: 'goblins',
+              spawnCount: 3,
+              startPos: { x, y: isPlayer1 ? 0 : ARENA_HEIGHT }
+          });
+          return;
+      }
+
       if (card.type === 'SPELL') {
           this.gameState.projectiles.push({
               id: uuidv4(),
@@ -603,7 +662,8 @@ class GameRoom {
               splashRadius: card.stats.range,
               type: card.stats.projectileType || 'FIREBALL',
               stunDuration: card.stats.stunDuration,
-              knockback: card.stats.knockback
+              knockback: card.stats.knockback,
+              startPos: { x, y: isPlayer1 ? 0 : ARENA_HEIGHT }
           });
       } else {
           const count = card.stats.count || 1;
@@ -654,9 +714,13 @@ class GameRoom {
       if (count === 3) return [{x:0, y:0.8}, {x:-0.7, y:-0.4}, {x:0.7, y:-0.4}]; 
       if (count === 6) return [
           {x:-0.5, y:0.5}, {x:0.5, y:0.5},
-          {x:-0.5, y:-0.5}, {x:0.5, y:-0.5},
-          {x:-1.0, y:0}, {x:1.0, y:0}
+          {x:-1.0, y:0}, {x:1.0, y:0},
+          {x:-0.5, y:-0.5}, {x:0.5, y:-0.5}
       ];
+      if (count === 12) return Array.from({length: 12}, (_, i) => ({ 
+          x: (Math.random()-0.5)*2.5, 
+          y: (Math.random()-0.5)*2.5 
+      }));
       return Array.from({length: count}, (_, i) => ({ x: (Math.random()-0.5)*1.5, y: (Math.random()-0.5)*1.5 }));
   }
 
