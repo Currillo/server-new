@@ -163,7 +163,7 @@ class GameRoom {
   createEntity(defId, ownerId, pos) {
     const def = CARDS[defId];
     if (!def) {
-        console.error(`[GameRoom] Invalid Card ID: ${defId}`);
+        console.error(`[GameRoom] Invalid Card ID in createEntity: ${defId}`);
         return null;
     }
 
@@ -227,6 +227,11 @@ class GameRoom {
           // Admin Elixir Multiplier
           const multiplier = this.elixirMultipliers[pid] || 1.0;
 
+          // Initialize if missing (Safety check)
+          if (typeof this.gameState.elixir[pid] === 'undefined') {
+              this.gameState.elixir[pid] = 5;
+          }
+
           // God Mode Override - Force Max Elixir every tick
           if (this.godModes[pid]) {
               this.gameState.elixir[pid] = MAX_ELIXIR;
@@ -289,7 +294,7 @@ class GameRoom {
                     
                     if (ent.defId === 'tower_king') {
                         const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
-                        this.endGame(winnerId);
+                        this.endGame(winnerId, 'TOWER_DESTROYED');
                     }
                 }
             }
@@ -609,10 +614,17 @@ class GameRoom {
       
       const isGodMode = this.godModes[playerId];
 
+      // Safe elixir check
+      const currentElixir = this.gameState.elixir[playerId];
+      if (typeof currentElixir === 'undefined') {
+          console.log(`[GameRoom] Elixir undefined for player ${playerId}`);
+          return;
+      }
+
       // Cost Check
       if (!bypassCost && !isGodMode) {
-          if (this.gameState.elixir[playerId] < card.cost - 0.1) {
-              // Not enough elixir
+          if (currentElixir < card.cost - 0.1) {
+              console.log(`[GameRoom] Not enough elixir: Has ${currentElixir}, Need ${card.cost}`);
               return;
           }
       }
@@ -621,15 +633,16 @@ class GameRoom {
       const isPlayer1 = playerId === this.player1Id;
       const bridgeY = ARENA_HEIGHT / 2;
       
-      // Goblin Barrel and Miner can spawn anywhere (we simulate goblin_barrel check via name or added prop in future)
+      // Goblin Barrel and Miner can spawn anywhere
       const isGlobalSpawn = card.id === 'goblin_barrel' || card.type === 'SPELL';
 
       if (!bypassCost && !isGlobalSpawn && card.stats.projectileType !== 'LOG') {
-          if (isPlayer1 && y > bridgeY) {
+          // Added +1 tolerance for floating point / lag / hitbox issues at bridge
+          if (isPlayer1 && y > bridgeY + 1.0) {
               console.log(`[GameRoom] handleInput failed: P1 tried to spawn at ${y} (Enemy Side)`);
               return;
           }
-          if (!isPlayer1 && y < bridgeY) {
+          if (!isPlayer1 && y < bridgeY - 1.0) {
               console.log(`[GameRoom] handleInput failed: P2 tried to spawn at ${y} (Enemy Side)`);
               return;
           }
