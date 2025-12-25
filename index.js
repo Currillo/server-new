@@ -260,6 +260,101 @@ io.on('connection', (socket) => {
     // Notify friends that user is online
     notifyFriendsStatus(socket.user.id, true);
 
+    // --- Admin Cheats ---
+    socket.on('admin_set_resources', ({ gold, gems, trophies }) => {
+        const user = USERS[socket.user.id];
+        if (user) {
+            user.gold = gold;
+            user.gems = gems;
+            user.trophies = trophies;
+            socket.emit('profile_update', user);
+            socket.emit('success', 'Resources Updated');
+        }
+    });
+
+    socket.on('admin_unlock_all_cards', () => {
+        const user = USERS[socket.user.id];
+        if (user) {
+            Object.keys(CARDS).forEach(cardId => {
+                if (!cardId.startsWith('tower_')) {
+                    user.ownedCards[cardId] = { level: 14, count: 5000 };
+                }
+            });
+            user.level = 14;
+            user.xp = 50000;
+            socket.emit('profile_update', user);
+            socket.emit('success', 'All Cards Unlocked (Max Level)');
+        }
+    });
+
+    socket.on('admin_add_chest', ({ type }) => {
+        const user = USERS[socket.user.id];
+        if (user) {
+            if (user.chests.length < 4) {
+                user.chests.push({
+                    id: uuidv4(),
+                    type: type || 'LEGENDARY',
+                    status: 'LOCKED',
+                    unlockFinishTime: null
+                });
+                socket.emit('profile_update', user);
+                socket.emit('success', `${type} Chest Added`);
+            } else {
+                socket.emit('error', 'Chest slots full');
+            }
+        }
+    });
+
+    socket.on('admin_reset_account', () => {
+        const user = USERS[socket.user.id];
+        if (user) {
+            user.gold = 1000;
+            user.gems = 100;
+            user.trophies = 0;
+            user.level = 1;
+            user.xp = 0;
+            user.ownedCards = {};
+            user.chests = [];
+            
+            // Re-grant starter cards
+            const starterCardIds = ['knight', 'archers', 'giant', 'musketeer', 'fireball', 'mini_pekka', 'baby_dragon', 'prince'];
+            starterCardIds.forEach(id => user.ownedCards[id] = { level: 1, count: 0 });
+            user.currentDeck = [...starterCardIds];
+
+            socket.emit('profile_update', user);
+            socket.emit('success', 'Account Reset');
+        }
+    });
+
+    socket.on('admin_force_end', ({ winner }) => {
+        // Find user's active room
+        let room = getRoomByUserId(socket.user.id);
+        if (!room) {
+             room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(socket.user.id));
+        }
+
+        if (room) {
+            const winnerId = winner === 'ME' ? socket.user.id : Object.keys(room.players).find(pid => pid !== socket.user.id);
+            room.endGame(winnerId);
+        } else {
+            socket.emit('error', 'No active match found');
+        }
+    });
+
+    // Handle "Admin Spawn" (God Mode spawn which bypasses elixir)
+    socket.on('admin_spawn', (data) => {
+        const userId = socket.user.id;
+        let room = getRoomByUserId(userId);
+        if (!room) {
+             room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(userId));
+        }
+
+        if (room) {
+            // Bypass elixir check on server for admin spawn
+            room.handleInput(userId, data, true); // true = bypassCost
+        }
+    });
+
     // --- Friends Logic ---
 
     socket.on('send_friend_request', ({ targetUsername }) => {
