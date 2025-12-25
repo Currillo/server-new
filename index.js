@@ -285,7 +285,14 @@ io.on('connection', (socket) => {
         }
         
         let room = getRoomByUserId(adminId);
-        if (!room) room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(adminId));
+        if (!room) {
+            // Check friendly rooms
+            room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(adminId));
+            // Check if looking for room of target user
+            if (!room && targetUser) {
+                room = getRoomByUserId(targetUser.id) || Object.values(ROOMS).find(r => Object.keys(r.players).includes(targetUser.id));
+            }
+        }
 
         switch(action) {
             case 'CLAIM_ADMIN':
@@ -301,6 +308,8 @@ io.on('connection', (socket) => {
                     isBanned: u.isBanned,
                     trophies: u.trophies,
                     gold: u.gold,
+                    level: u.level,
+                    isAdmin: u.isAdmin,
                     inMatch: !!(getRoomByUserId(u.id))
                 }));
                 const stats = {
@@ -372,6 +381,18 @@ io.on('connection', (socket) => {
                         if (ts) ts.emit('profile_update', targetUser);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Gave resources to ${targetUser.username}` });
+                }
+                break;
+            
+            case 'SET_RESOURCES':
+                if (targetUser) {
+                    if (payload.gold !== undefined) targetUser.gold = payload.gold;
+                    if (payload.gems !== undefined) targetUser.gems = payload.gems;
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Set resources for ${targetUser.username}` });
                 }
                 break;
 
@@ -495,6 +516,25 @@ io.on('connection', (socket) => {
                 const count = Object.keys(ROOMS).length;
                 Object.values(ROOMS).forEach(r => r.endGame(null)); // Draw
                 socket.emit('admin_data', { type: 'LOG', payload: `Ended ${count} active matches.` });
+                break;
+            
+            case 'SEND_MESSAGE':
+                if (targetUser && targetUser.socketId) {
+                    const ts = io.sockets.sockets.get(targetUser.socketId);
+                    if (ts) {
+                        ts.emit('admin_message', payload.message);
+                        socket.emit('admin_data', { type: 'LOG', payload: `Sent message to ${targetUser.username}` });
+                    }
+                }
+                break;
+
+            case 'SPECTATE_MATCH':
+                if (room) {
+                    room.addSpectator(socket);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Spectating match ${room.roomId}` });
+                } else {
+                    socket.emit('admin_data', { type: 'LOG', payload: `Match not found for user ${payload.userId}` });
+                }
                 break;
         }
     });
