@@ -74,7 +74,8 @@ app.post('/api/auth/register', (req, res) => {
         friendRequests: [],
         ownedCards: ownedCards,
         currentDeck: [...starterCardIds],
-        chests: []
+        chests: [],
+        isBanned: false
     };
 
     USERS[id] = newUser;
@@ -90,6 +91,9 @@ app.post('/api/auth/login', (req, res) => {
     const user = Object.values(USERS).find(u => u.username === username || u.name === username);
     
     if (user) {
+        if (user.isBanned) {
+            return res.status(403).json({ message: "Account is banned." });
+        }
         res.json({
             token: user.id,
             profile: user
@@ -103,6 +107,7 @@ app.get('/api/auth/profile', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const user = USERS[token];
     if (user) {
+        if (user.isBanned) return res.status(403).json({ message: "Account Banned" });
         res.json(user);
     } else {
         res.status(401).json({ message: "Invalid Token" });
@@ -242,6 +247,7 @@ io.use((socket, next) => {
     const token = socket.handshake.auth.token;
     const user = USERS[token];
     if (user) {
+        if (user.isBanned) return next(new Error("Account Banned"));
         socket.user = user;
         // Important: Update the socket ID on the master record immediately
         user.socketId = socket.id; 
@@ -260,98 +266,180 @@ io.on('connection', (socket) => {
     // Notify friends that user is online
     notifyFriendsStatus(socket.user.id, true);
 
-    // --- Admin Cheats ---
-    socket.on('admin_set_resources', ({ gold, gems, trophies }) => {
-        const user = USERS[socket.user.id];
-        if (user) {
-            user.gold = gold;
-            user.gems = gems;
-            user.trophies = trophies;
-            socket.emit('profile_update', user);
-            socket.emit('success', 'Resources Updated');
-        }
-    });
+    // --- FULL ADMIN PANEL LOGIC ---
+    socket.on('admin_action', ({ action, payload }) => {
+        const adminId = socket.user.id;
+        const targetUser = payload.userId ? USERS[payload.userId] : USERS[adminId];
+        
+        let room = getRoomByUserId(adminId);
+        if (!room) room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(adminId));
 
-    socket.on('admin_unlock_all_cards', () => {
-        const user = USERS[socket.user.id];
-        if (user) {
-            Object.keys(CARDS).forEach(cardId => {
-                if (!cardId.startsWith('tower_')) {
-                    user.ownedCards[cardId] = { level: 14, count: 5000 };
+        switch(action) {
+            case 'GET_STATS':
+                const userList = Object.values(USERS).map(u => ({
+                    id: u.id,
+                    username: u.username,
+                    isBanned: u.isBanned,
+                    trophies: u.trophies,
+                    gold: u.gold,
+                    inMatch: !!(getRoomByUserId(u.id))
+                }));
+                const stats = {
+                    uptime: process.uptime(),
+                    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024)
+                };
+                socket.emit('admin_data', { type: 'USERS_LIST', payload: userList });
+                socket.emit('admin_data', { type: 'SERVER_STATS', payload: stats });
+                break;
+
+            case 'BAN_USER':
+                if (targetUser) {
+                    targetUser.isBanned = true;
+                    // Force disconnect
+                    if (targetUser.socketId) {
+                        const targetSocket = io.sockets.sockets.get(targetUser.socketId);
+                        if (targetSocket) targetSocket.disconnect(true);
+                    }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Banned user ${targetUser.username}` });
                 }
-            });
-            user.level = 14;
-            user.xp = 50000;
-            socket.emit('profile_update', user);
-            socket.emit('success', 'All Cards Unlocked (Max Level)');
-        }
-    });
+                break;
 
-    socket.on('admin_add_chest', ({ type }) => {
-        const user = USERS[socket.user.id];
-        if (user) {
-            if (user.chests.length < 4) {
-                user.chests.push({
-                    id: uuidv4(),
-                    type: type || 'LEGENDARY',
-                    status: 'LOCKED',
-                    unlockFinishTime: null
-                });
-                socket.emit('profile_update', user);
-                socket.emit('success', `${type} Chest Added`);
-            } else {
-                socket.emit('error', 'Chest slots full');
-            }
-        }
-    });
+            case 'KICK_USER':
+                if (targetUser && targetUser.socketId) {
+                    const targetSocket = io.sockets.sockets.get(targetUser.socketId);
+                    if (targetSocket) targetSocket.disconnect(true);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Kicked user ${targetUser.username}` });
+                }
+                break;
 
-    socket.on('admin_reset_account', () => {
-        const user = USERS[socket.user.id];
-        if (user) {
-            user.gold = 1000;
-            user.gems = 100;
-            user.trophies = 0;
-            user.level = 1;
-            user.xp = 0;
-            user.ownedCards = {};
-            user.chests = [];
+            case 'RESET_USER':
+                if (targetUser) {
+                    targetUser.gold = 1000;
+                    targetUser.gems = 100;
+                    targetUser.trophies = 0;
+                    targetUser.level = 1;
+                    targetUser.xp = 0;
+                    targetUser.ownedCards = {};
+                    targetUser.chests = [];
+                    // Reset Deck
+                    const starterCardIds = ['knight', 'archers', 'giant', 'musketeer', 'fireball', 'mini_pekka', 'baby_dragon', 'prince'];
+                    starterCardIds.forEach(id => targetUser.ownedCards[id] = { level: 1, count: 0 });
+                    targetUser.currentDeck = [...starterCardIds];
+                    
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Reset user ${targetUser.username}` });
+                }
+                break;
+
+            case 'GIVE_RESOURCES':
+                if (targetUser) {
+                    targetUser.gold = (targetUser.gold || 0) + (payload.gold || 0);
+                    targetUser.gems = (targetUser.gems || 0) + (payload.gems || 0);
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                }
+                break;
+
+            case 'UNLOCK_ALL_CARDS':
+                if (targetUser) {
+                    Object.keys(CARDS).forEach(cardId => {
+                        if (!cardId.startsWith('tower_')) {
+                            targetUser.ownedCards[cardId] = { level: 14, count: 5000 };
+                        }
+                    });
+                    targetUser.level = 14;
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                }
+                break;
+
+            case 'GIVE_CHEST':
+                if (targetUser) {
+                    if (targetUser.chests.length < 4) {
+                        targetUser.chests.push({
+                            id: uuidv4(),
+                            type: payload.type || 'LEGENDARY',
+                            status: 'LOCKED',
+                            unlockFinishTime: null
+                        });
+                        if (targetUser.socketId) {
+                            const ts = io.sockets.sockets.get(targetUser.socketId);
+                            if (ts) ts.emit('profile_update', targetUser);
+                        }
+                    }
+                }
+                break;
+
+            case 'INSTANT_OPEN_CHESTS':
+                if (targetUser) {
+                    targetUser.chests.forEach(c => {
+                        c.status = 'UNLOCKING';
+                        c.unlockFinishTime = Date.now(); // Ready now
+                    });
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                }
+                break;
+
+            case 'TOGGLE_GOD_MODE':
+                // Affects current room logic
+                if (room) {
+                    room.setGodMode(adminId, payload.enabled);
+                }
+                break;
             
-            // Re-grant starter cards
-            const starterCardIds = ['knight', 'archers', 'giant', 'musketeer', 'fireball', 'mini_pekka', 'baby_dragon', 'prince'];
-            starterCardIds.forEach(id => user.ownedCards[id] = { level: 1, count: 0 });
-            user.currentDeck = [...starterCardIds];
+            case 'TOGGLE_INVINCIBLE':
+                if (room) {
+                    room.setInvincibility(adminId, payload.enabled);
+                }
+                break;
 
-            socket.emit('profile_update', user);
-            socket.emit('success', 'Account Reset');
-        }
-    });
+            case 'FORCE_WIN':
+                if (room) room.endGame(adminId);
+                break;
 
-    socket.on('admin_force_end', ({ winner }) => {
-        // Find user's active room
-        let room = getRoomByUserId(socket.user.id);
-        if (!room) {
-             room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(socket.user.id));
-        }
+            case 'FORCE_LOSE':
+                if (room) {
+                    const enemyId = Object.keys(room.players).find(pid => pid !== adminId);
+                    room.endGame(enemyId);
+                }
+                break;
 
-        if (room) {
-            const winnerId = winner === 'ME' ? socket.user.id : Object.keys(room.players).find(pid => pid !== socket.user.id);
-            room.endGame(winnerId);
-        } else {
-            socket.emit('error', 'No active match found');
-        }
-    });
+            case 'DESTROY_TOWERS':
+                if (room) {
+                    // team: 'ENEMY' or 'PLAYER'
+                    const targetOwnerId = payload.team === 'PLAYER' ? adminId : Object.keys(room.players).find(pid => pid !== adminId);
+                    room.destroyTowers(targetOwnerId);
+                }
+                break;
 
-    // Handle "Admin Spawn" (God Mode spawn which bypasses elixir)
-    socket.on('admin_spawn', (data) => {
-        const userId = socket.user.id;
-        let room = getRoomByUserId(userId);
-        if (!room) {
-             room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(userId));
-        }
+            case 'ADMIN_SPAWN':
+                if (room) {
+                    // Spawn at bridge
+                    const isP1 = room.player1Id === adminId;
+                    const bridgeY = ARENA_HEIGHT / 2;
+                    const spawnY = isP1 ? bridgeY - 2 : bridgeY + 2;
+                    room.handleInput(adminId, { cardId: payload.cardId, x: ARENA_WIDTH / 2, y: spawnY }, true);
+                }
+                break;
 
-        if (room) {
-            // Bypass elixir check on server for admin spawn
-            room.handleInput(userId, data, true); // true = bypassCost
+            case 'BROADCAST':
+                io.emit('success', `SERVER MSG: ${payload.msg}`);
+                break;
+
+            case 'FORCE_END_ALL':
+                Object.values(ROOMS).forEach(r => r.endGame(null)); // Draw
+                socket.emit('admin_data', { type: 'LOG', payload: `Ended all matches.` });
+                break;
         }
     });
 
