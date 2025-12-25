@@ -305,19 +305,22 @@ class GameRoom {
                     if (ent.defId === 'tower_king') {
                         const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
                         this.endGame(winnerId, 'TOWER_DESTROYED');
+                        return; // Stop update loop immediately if game over
                     }
                 }
             }
         }
 
         // 4. Broadcast
-        this.io.to(this.roomId).emit('game_update', {
-            time: this.gameState.time,
-            elixir: this.gameState.elixir,
-            entities: this.gameState.entities,
-            projectiles: this.gameState.projectiles,
-            effects: this.effectQueue // Broadcast gathered effects
-        });
+        if (!this.gameState.gameOver) {
+            this.io.to(this.roomId).emit('game_update', {
+                time: this.gameState.time,
+                elixir: this.gameState.elixir,
+                entities: this.gameState.entities,
+                projectiles: this.gameState.projectiles,
+                effects: this.effectQueue // Broadcast gathered effects
+            });
+        }
         
         // Clear effects after broadcast
         this.effectQueue = [];
