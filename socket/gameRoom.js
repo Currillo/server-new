@@ -80,6 +80,29 @@ class GameRoom {
       });
   }
 
+  // NEW: Get lightweight stats for admin inspector
+  getLiveStats(userId) {
+      const elixir = this.gameState.elixir[userId] || 0;
+      
+      // Calculate total tower HP
+      const towerHp = this.gameState.entities
+          .filter(e => e.ownerId === userId && e.defId.startsWith('tower'))
+          .reduce((sum, e) => sum + e.hp, 0);
+
+      // Count active units (excluding towers)
+      const unitCount = this.gameState.entities
+          .filter(e => e.ownerId === userId && !e.defId.startsWith('tower'))
+          .length;
+
+      return {
+          elixir: parseFloat(elixir.toFixed(1)),
+          towerHp: Math.floor(towerHp),
+          unitCount,
+          isFrozen: !!this.frozenPlayers[userId],
+          elixirMult: this.elixirMultipliers[userId] || 1
+      };
+  }
+
   addSpectator(socket) {
       socket.join(this.roomId);
       // Emit game_start to the spectator so their client initializes the engine
