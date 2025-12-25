@@ -513,6 +513,56 @@ io.on('connection', (socket) => {
                 }
                 break;
 
+            case 'SET_LEVELS':
+                if (targetUser && payload.level) {
+                    const lvl = parseInt(payload.level);
+                    Object.keys(targetUser.ownedCards).forEach(cardId => {
+                        targetUser.ownedCards[cardId].level = lvl;
+                    });
+                    logUserActivity(targetUser.id, 'SET_LEVELS', `All cards set to Lv.${lvl}`);
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Set all cards to Lv.${lvl} for ${targetUser.username}` });
+                }
+                break;
+
+            case 'CLONE_DECK':
+                if (targetUser && payload.sourceId) {
+                    const sourceUser = USERS[payload.sourceId];
+                    if (sourceUser) {
+                        targetUser.currentDeck = [...sourceUser.currentDeck];
+                        logUserActivity(targetUser.id, 'CLONE_DECK', `From ${sourceUser.username}`);
+                        if (targetUser.socketId) {
+                            const ts = io.sockets.sockets.get(targetUser.socketId);
+                            if (ts) ts.emit('profile_update', targetUser);
+                        }
+                        socket.emit('admin_data', { type: 'LOG', payload: `Cloned deck from ${sourceUser.username} to ${targetUser.username}` });
+                    }
+                }
+                break;
+
+            case 'TOGGLE_TEMP_ADMIN':
+                if (targetUser) {
+                    targetUser.isAdmin = !targetUser.isAdmin;
+                    logUserActivity(targetUser.id, 'ADMIN_TOGGLE', `Status: ${targetUser.isAdmin}`);
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Toggled admin for ${targetUser.username}` });
+                }
+                break;
+
+            case 'FORCE_UPDATE_INVENTORY':
+                if (targetUser && targetUser.socketId) {
+                    const ts = io.sockets.sockets.get(targetUser.socketId);
+                    if (ts) ts.emit('profile_update', targetUser);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Forced update for ${targetUser.username}` });
+                }
+                break;
+
             case 'GIVE_CHEST':
                 if (targetUser) {
                     if (targetUser.chests.length < 4) {
@@ -545,6 +595,21 @@ io.on('connection', (socket) => {
                         if (ts) ts.emit('profile_update', targetUser);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Instant opened chests for ${targetUser.username}` });
+                }
+                break;
+
+            case 'FORCE_OPEN_CHEST':
+                if (targetUser && payload.chestId) {
+                    const chest = targetUser.chests.find(c => c.id === payload.chestId);
+                    if (chest) {
+                        chest.status = 'READY';
+                        chest.unlockFinishTime = Date.now();
+                        if (targetUser.socketId) {
+                            const ts = io.sockets.sockets.get(targetUser.socketId);
+                            if (ts) ts.emit('profile_update', targetUser);
+                        }
+                        socket.emit('admin_data', { type: 'LOG', payload: `Forced chest READY for ${targetUser.username}` });
+                    }
                 }
                 break;
 
