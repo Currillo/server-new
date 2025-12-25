@@ -75,7 +75,8 @@ app.post('/api/auth/register', (req, res) => {
         ownedCards: ownedCards,
         currentDeck: [...starterCardIds],
         chests: [],
-        isBanned: false
+        isBanned: false,
+        isAdmin: false
     };
 
     USERS[id] = newUser;
@@ -280,8 +281,6 @@ io.on('connection', (socket) => {
             targetUser = USERS[payload.userId];
             if (!targetUser) {
                 console.log(`[Admin] Target User Not Found: ${payload.userId}`);
-                // Proceeding might be safe if action handles undefined target, but usually we want to know.
-                // We'll let the individual cases handle 'if (!targetUser)' checks.
             }
         }
         
@@ -289,6 +288,12 @@ io.on('connection', (socket) => {
         if (!room) room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(adminId));
 
         switch(action) {
+            case 'CLAIM_ADMIN':
+                USERS[adminId].isAdmin = true;
+                socket.emit('profile_update', USERS[adminId]);
+                socket.emit('admin_data', { type: 'LOG', payload: `Admin status claimed by ${socket.user.username}` });
+                break;
+
             case 'GET_STATS':
                 const userList = Object.values(USERS).map(u => ({
                     id: u.id,
@@ -312,7 +317,10 @@ io.on('connection', (socket) => {
                     // Force disconnect
                     if (targetUser.socketId) {
                         const targetSocket = io.sockets.sockets.get(targetUser.socketId);
-                        if (targetSocket) targetSocket.disconnect(true);
+                        if (targetSocket) {
+                            targetSocket.emit('force_logout');
+                            targetSocket.disconnect(true);
+                        }
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Banned user ${targetUser.username}` });
                 } else {
@@ -323,8 +331,11 @@ io.on('connection', (socket) => {
             case 'KICK_USER':
                 if (targetUser && targetUser.socketId) {
                     const targetSocket = io.sockets.sockets.get(targetUser.socketId);
-                    if (targetSocket) targetSocket.disconnect(true);
-                    socket.emit('admin_data', { type: 'LOG', payload: `Kicked user ${targetUser.username}` });
+                    if (targetSocket) {
+                        targetSocket.emit('force_logout');
+                        targetSocket.disconnect(true);
+                        socket.emit('admin_data', { type: 'LOG', payload: `Kicked user ${targetUser.username}` });
+                    }
                 } else {
                     socket.emit('admin_data', { type: 'LOG', payload: `Error: User not online or found for KICK` });
                 }
