@@ -8,7 +8,7 @@ const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 
 // Modules
-const { handleMatchmaking, getRoomByUserId, cleanupUser } = require('./socket/matchmaking');
+const { handleMatchmaking, getRoomByUserId, removeRoom, cleanupUser } = require('./socket/matchmaking');
 const GameRoom = require('./socket/gameRoom'); // Import directly for friendly battles
 const { CARDS, UPGRADE_COSTS, CARDS_REQUIRED, CHEST_DATA } = require('./gameData');
 
@@ -403,9 +403,16 @@ io.on('connection', (socket) => {
             room.endGame(winnerId, 'OPPONENT_LEFT');
             
             // Clean up later to allow UI to show result
+            const roomId = room.roomId;
             setTimeout(() => {
-                if (rooms[room.roomId]) delete rooms[room.roomId]; // For matchmaker
-                if (ROOMS[room.roomId]) delete ROOMS[room.roomId]; // For friendly
+                // Use exported helper to remove from matchmaking rooms
+                removeRoom(roomId);
+                
+                // Also check friendly rooms
+                if (ROOMS[roomId]) {
+                    delete ROOMS[roomId];
+                    console.log(`[Friendly] Room ${roomId} removed.`);
+                }
             }, 5000);
         }
     });
@@ -1338,10 +1345,12 @@ io.on('connection', (socket) => {
         notifyFriendsStatus(socket.user.id, false);
         cleanupUser(socket.user.id, socket.id);
         
+        // Check for Friendly Room Cleanup on disconnect
         Object.keys(ROOMS).forEach(roomId => {
             const r = ROOMS[roomId];
             if (r.players[socket.user.id]) {
                 delete ROOMS[roomId];
+                console.log(`[Friendly] Room ${roomId} closed due to disconnect.`);
             }
         });
     });
