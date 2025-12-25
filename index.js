@@ -497,14 +497,65 @@ io.on('connection', (socket) => {
                 }
                 break;
 
+            case 'TRANSFER_CARD':
+                if (targetUser && payload.receiverId && payload.cardId && payload.count) {
+                    const receiverUser = USERS[payload.receiverId];
+                    const cardId = payload.cardId;
+                    const count = parseInt(payload.count);
+                    
+                    if (receiverUser && count > 0) {
+                        // Check Sender balance (Sender is targetUser in this context since admin selected them)
+                        if (!targetUser.ownedCards[cardId] || targetUser.ownedCards[cardId].count < count) {
+                             socket.emit('admin_data', { type: 'LOG', payload: `Transfer failed: Sender ${targetUser.username} insufficient cards` });
+                             return;
+                        }
+                        
+                        // Deduct from Sender
+                        targetUser.ownedCards[cardId].count -= count;
+                        
+                        // Add to Receiver
+                        if (!receiverUser.ownedCards[cardId]) {
+                            receiverUser.ownedCards[cardId] = { level: 1, count: 0 };
+                        }
+                        receiverUser.ownedCards[cardId].count += count;
+                        
+                        logUserActivity(targetUser.id, 'TRANSFER_SENT', `${count}x ${cardId} to ${receiverUser.username}`);
+                        logUserActivity(receiverUser.id, 'TRANSFER_RECV', `${count}x ${cardId} from ${targetUser.username}`);
+                        
+                        // Update Sender
+                        if (targetUser.socketId) {
+                            const ts = io.sockets.sockets.get(targetUser.socketId);
+                            if (ts) ts.emit('profile_update', targetUser);
+                        }
+                        // Update Receiver
+                        if (receiverUser.socketId) {
+                            const rs = io.sockets.sockets.get(receiverUser.socketId);
+                            if (rs) rs.emit('profile_update', receiverUser);
+                        }
+                        
+                        socket.emit('admin_data', { type: 'LOG', payload: `Transferred ${count} ${cardId} from ${targetUser.username} to ${receiverUser.username}` });
+                    } else {
+                        socket.emit('admin_data', { type: 'LOG', payload: `Transfer failed: Invalid receiver or count` });
+                    }
+                }
+                break;
+
             case 'UNLOCK_ALL_CARDS':
                 if (targetUser) {
                     Object.keys(CARDS).forEach(cardId => {
                         if (!cardId.startsWith('tower_')) {
-                            targetUser.ownedCards[cardId] = { level: 14, count: 5000 };
+                            // If card entry doesn't exist, create it. If it does, update it.
+                            if (!targetUser.ownedCards[cardId]) {
+                                targetUser.ownedCards[cardId] = { level: 14, count: 5000 };
+                            } else {
+                                targetUser.ownedCards[cardId].level = 14;
+                                // Add 5000 if not already maxed out just to be safe, or just set it
+                                targetUser.ownedCards[cardId].count = 5000;
+                            }
                         }
                     });
                     targetUser.level = 14;
+                    logUserActivity(targetUser.id, 'UNLOCK_ALL', 'Maxed out collection');
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
                         if (ts) ts.emit('profile_update', targetUser);
