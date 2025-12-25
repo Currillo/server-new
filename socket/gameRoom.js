@@ -7,9 +7,10 @@ const ELIXIR_RATE = 2.8;
 const MAX_ELIXIR = 10;
 
 class GameRoom {
-  constructor(roomId, player1, player2, io) {
+  constructor(roomId, player1, player2, io, onMatchEnd) {
     this.roomId = roomId;
     this.io = io;
+    this.onMatchEnd = onMatchEnd; // Callback for server-side economy updates
     
     // Players map: ID -> Data
     this.players = {
@@ -20,6 +21,7 @@ class GameRoom {
     // Store explicit references to who is who for orientation
     this.player1Id = player1.id; // Bottom Player
     this.player2Id = player2.id; // Top Player
+    this.isFriendly = false; // Flag to determine if stats should update
 
     // P1 is "Bottom" (y=0..16 visually for them), P2 is "Top"
     // Server coordinates are absolute 0..32.
@@ -70,6 +72,7 @@ class GameRoom {
       targetId: null,
       lastAttackTime: 0,
       deployTimer: def.stats.deployTime,
+      deathTimer: 0,
       facingRight: true
     };
   }
@@ -80,7 +83,8 @@ class GameRoom {
       players: this.players,
       player1Id: this.player1Id,
       player2Id: this.player2Id,
-      endTime: Date.now() + 180000
+      endTime: Date.now() + 180000,
+      isFriendly: this.isFriendly
     });
     
     this.intervalId = setInterval(() => this.update(), 1000 / TICK_RATE);
@@ -121,14 +125,26 @@ class GameRoom {
             continue;
         }
 
+        // Handle Dying State (Visual feedback buffer)
+        if (ent.state === 'DYING') {
+            ent.deathTimer = (ent.deathTimer || 1) - dt;
+            if (ent.deathTimer <= 0) {
+                this.gameState.entities.splice(i, 1);
+            }
+            continue; // Skip normal update logic for dying units
+        }
+
         this.updateEntity(ent, dt);
         
         if (ent.hp <= 0) {
-            this.gameState.entities.splice(i, 1);
+            // Transition to DYING instead of removing immediately
+            ent.state = 'DYING';
+            ent.deathTimer = 1.0; // 1 second visual decay
+            
             if (ent.defId === 'tower_king') {
                 const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
                 this.endGame(winnerId);
-                return;
+                // Do NOT return here, allow the DYING state to be broadcast in the final frame
             }
         }
     }
@@ -155,7 +171,7 @@ class GameRoom {
     // AI Logic: Find Target or Move
     let target = null;
     if (ent.targetId) {
-        target = this.gameState.entities.find(e => e.id === ent.targetId);
+        target = this.gameState.entities.find(e => e.id === ent.targetId && e.state !== 'DYING');
     }
     
     if (!target || target.hp <= 0) {
@@ -225,6 +241,7 @@ class GameRoom {
 
       for (const other of this.gameState.entities) {
           if (other.ownerId === me.ownerId) continue;
+          if (other.state === 'DYING') continue;
           if (stats.targetPreference === 'BUILDINGS' && CARDS[other.defId].type !== 'BUILDING') continue;
 
           const d2 = (me.position.x - other.position.x)**2 + (me.position.y - other.position.y)**2;
@@ -253,7 +270,7 @@ class GameRoom {
           // Instant Melee
           if (stats.splashRadius > 0) {
               this.gameState.entities.forEach(e => {
-                  if (e.ownerId !== source.ownerId) {
+                  if (e.ownerId !== source.ownerId && e.state !== 'DYING') {
                       const d2 = (e.position.x - source.position.x)**2 + (e.position.y - source.position.y)**2;
                       if (d2 <= stats.splashRadius**2) {
                           e.hp -= stats.damage;
@@ -282,7 +299,7 @@ class GameRoom {
           if (dist < 0.5) {
               if (p.splashRadius > 0) {
                   this.gameState.entities.forEach(e => {
-                    if (e.ownerId !== p.ownerId) {
+                    if (e.ownerId !== p.ownerId && e.state !== 'DYING') {
                         const d2 = (e.position.x - p.targetPos.x)**2 + (e.position.y - p.targetPos.y)**2;
                         if (d2 <= p.splashRadius**2) e.hp -= p.damage;
                     }
@@ -315,9 +332,6 @@ class GameRoom {
       }
 
       // Validate Side
-      // P1 (Bottom) must spawn in bottom half (y < 16)
-      // P2 (Top) must spawn in top half (y > 16)
-      
       const isPlayer1 = playerId === this.player1Id;
       const bridgeY = ARENA_HEIGHT / 2;
       
@@ -363,8 +377,23 @@ class GameRoom {
       
       this.gameState.gameOver = true;
       this.gameState.winner = winnerId;
-      this.io.to(this.roomId).emit('game_over', { winnerId });
-      console.log(`[Room ${this.roomId}] Game Over. Winner: ${winnerId}`);
+      
+      // Calculate Trophies
+      let trophyChange = 0;
+      if (!this.isFriendly && winnerId) {
+          trophyChange = 30; // Standard reward
+      }
+      
+      // Execute Server Callback for Economy (Gold/Chests)
+      if (this.onMatchEnd) {
+          this.onMatchEnd(winnerId, this.players, this.isFriendly);
+      }
+      
+      this.io.to(this.roomId).emit('game_over', { 
+          winnerId,
+          trophyChange // Clients can use this if they want authoritative data
+      });
+      console.log(`[Room ${this.roomId}] Game Over. Winner: ${winnerId}, Trophies: ${trophyChange}`);
       
       clearInterval(this.intervalId);
   }
