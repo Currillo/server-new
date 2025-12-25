@@ -1,3 +1,4 @@
+
 const mongoose = require('mongoose');
 
 const CardSchema = new mongoose.Schema({
@@ -24,6 +25,11 @@ const UserSchema = new mongoose.Schema({
   xp: { type: Number, default: 0 },
   level: { type: Number, default: 1 },
   trophies: { type: Number, default: 0 },
+
+  // Profile Customization
+  description: { type: String, default: "Ready for battle!" },
+  bannerId: { type: String, default: "bg-gradient-to-r from-blue-600 to-blue-400" },
+  badges: { type: [String], default: [] },
 
   // Gameplay
   ownedCards: [CardSchema],
