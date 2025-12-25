@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 // Modules
 const { handleMatchmaking, getRoomByUserId, cleanupUser } = require('./socket/matchmaking');
 const GameRoom = require('./socket/gameRoom'); // Import directly for friendly battles
-const { CARDS, UPGRADE_COSTS, CARDS_REQUIRED } = require('./gameData');
+const { CARDS, UPGRADE_COSTS, CARDS_REQUIRED, CHEST_DATA } = require('./gameData');
 
 // --- In-Memory Database ---
 const USERS = {}; // id -> UserProfile
@@ -28,13 +28,17 @@ app.use(express.json());
 const grantChest = (user) => {
     if (user.chests.length >= 4) return false;
     
-    // Simple logic: 70% Silver, 30% Gold
-    const isGold = Math.random() > 0.7;
+    // Simple logic: 70% Silver, 30% Gold, 5% Magical
+    const rand = Math.random();
+    let type = 'SILVER';
+    if (rand > 0.95) type = 'MAGICAL';
+    else if (rand > 0.7) type = 'GOLD';
+
     const chest = {
         id: uuidv4(),
-        type: isGold ? 'GOLD' : 'SILVER',
-        unlockTime: null,
-        isReady: false
+        type,
+        status: 'LOCKED',
+        unlockFinishTime: null
     };
     user.chests.push(chest);
     return true;
@@ -47,8 +51,6 @@ app.post('/api/auth/register', (req, res) => {
     const id = uuidv4();
     
     // Default Starter Cards
-    // Initialize ALL cards to 0 count, level 1, but mark starter deck as owned
-    // Actually simpler: just give starter cards with count 0
     const starterCardIds = ['knight', 'archers', 'giant', 'musketeer', 'fireball', 'mini_pekka', 'baby_dragon', 'prince'];
     
     const ownedCards = {};
@@ -151,6 +153,33 @@ app.post('/api/player/upgrade', (req, res) => {
     res.json({ success: true, profile: user });
 });
 
+// Chest Logic: Start Unlock
+app.post('/api/player/chest/unlock', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = USERS[token];
+    const { chestId } = req.body;
+    
+    if (!user) return res.status(401).send();
+    
+    const chest = user.chests.find(c => c.id === chestId);
+    if (!chest) return res.status(404).json({ message: "Chest not found" });
+    if (chest.status !== 'LOCKED') return res.status(400).json({ message: "Chest busy or ready" });
+
+    // Check if another is unlocking
+    const unlocking = user.chests.find(c => c.status === 'UNLOCKING');
+    if (unlocking) return res.status(400).json({ message: "Another chest is unlocking" });
+
+    // For Demo: Use 10 seconds instead of hours
+    // const duration = (CHEST_DATA[chest.type]?.unlockSeconds || 10800) * 1000;
+    const duration = 10000; // 10 seconds fixed for testing
+
+    chest.status = 'UNLOCKING';
+    chest.unlockFinishTime = Date.now() + duration;
+
+    res.json({ success: true, profile: user });
+});
+
+// Chest Logic: Open
 app.post('/api/player/chest/open', (req, res) => {
     const token = req.headers.authorization?.split(' ')[1];
     const user = USERS[token];
@@ -161,28 +190,44 @@ app.post('/api/player/chest/open', (req, res) => {
     const idx = user.chests.findIndex(c => c.id === chestId);
     if (idx === -1) return res.status(404).json({ message: "Chest not found" });
 
-    // For demo: Instant open (no timer needed)
     const chest = user.chests[idx];
-    user.chests.splice(idx, 1);
-
-    const isGold = chest.type === 'GOLD';
-    const goldReward = isGold ? 200 : 50;
-    const cardsCount = isGold ? 20 : 5;
     
-    // Rewards
-    user.gold += goldReward;
+    // Check timing if it was unlocking
+    if (chest.status === 'UNLOCKING') {
+        if (Date.now() < chest.unlockFinishTime) {
+            return res.status(400).json({ message: "Not ready yet" });
+        }
+    } else if (chest.status === 'LOCKED') {
+        // Can't open locked chest without gems (feature not implemented)
+        return res.status(400).json({ message: "Chest is locked" });
+    }
 
-    // Random Cards
+    // Determine Rewards
+    const data = CHEST_DATA[chest.type] || CHEST_DATA['SILVER'];
+    const gold = Math.floor(Math.random() * (data.maxGold - data.minGold) + data.minGold);
+    const cardCount = data.cards;
+    
+    const rewards = { gold, cards: [] };
+    
+    // Give Gold
+    user.gold += gold;
+
+    // Give Cards
     const allCardIds = Object.keys(CARDS).filter(id => !id.startsWith('tower_'));
-    for(let i=0; i<cardsCount; i++) {
+    for(let i=0; i<cardCount; i++) {
         const randId = allCardIds[Math.floor(Math.random() * allCardIds.length)];
+        
         if (!user.ownedCards[randId]) {
             user.ownedCards[randId] = { level: 1, count: 0 };
         }
         user.ownedCards[randId].count++;
+        rewards.cards.push(randId);
     }
 
-    res.json({ success: true, profile: user, rewards: { gold: goldReward, cards: cardsCount } });
+    // Remove chest
+    user.chests.splice(idx, 1);
+
+    res.json({ success: true, profile: user, rewards });
 });
 
 
@@ -218,16 +263,12 @@ io.on('connection', (socket) => {
     // --- Friends Logic ---
 
     socket.on('send_friend_request', ({ targetUsername }) => {
-        console.log(`[FriendRequest] From: ${socket.user.username} To: ${targetUsername}`);
-        
         const target = Object.values(USERS).find(u => u.username === targetUsername || u.name === targetUsername);
         
         if (!target) {
-            console.log(`[FriendRequest] Failed: Target '${targetUsername}' not found.`);
             socket.emit('error', 'User not found');
             return;
         }
-
         if (target.id === socket.user.id) {
             socket.emit('error', 'Cannot add yourself');
             return;
@@ -241,32 +282,21 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // 1. Add request to database
         target.friendRequests.push({
             fromId: socket.user.id,
             fromName: socket.user.name
         });
-        console.log(`[FriendRequest] Added to DB for ${target.username}. Current Requests: ${target.friendRequests.length}`);
 
-        // 2. Real-time Notification
         if (target.socketId) {
-            // Check if socket is actually connected
             const targetSocket = io.sockets.sockets.get(target.socketId);
             if (targetSocket) {
                 targetSocket.emit('friend_request_received', { 
                     fromId: socket.user.id, 
                     fromName: socket.user.name 
                 });
-                // Force profile update to show badge
                 targetSocket.emit('profile_update', target);
-                console.log(`[FriendRequest] Notification SENT to socket ${target.socketId}`);
-            } else {
-                console.log(`[FriendRequest] Target socket ${target.socketId} not found in active sockets.`);
             }
-        } else {
-            console.log(`[FriendRequest] Target ${target.username} has no socketId (Offline).`);
         }
-
         socket.emit('success', `Request sent to ${target.name}`);
     });
 
@@ -274,21 +304,15 @@ io.on('connection', (socket) => {
         const user = USERS[socket.user.id];
         const requester = USERS[requesterId];
 
-        console.log(`[FriendRequest] ${user.username} accepting ${requester ? requester.username : requesterId}`);
-
-        // Remove request
         user.friendRequests = user.friendRequests.filter(r => r.fromId !== requesterId);
         
         if (requester) {
-            // Add mutual friendship
             if (!user.friends.includes(requesterId)) user.friends.push(requesterId);
             if (!requester.friends.includes(user.id)) requester.friends.push(user.id);
 
-            // Notify User
             socket.emit('profile_update', user);
             socket.emit('friend_added', { id: requester.id, name: requester.name, isOnline: !!requester.socketId });
 
-            // Notify Requester
             if (requester.socketId) {
                 const reqSocket = io.sockets.sockets.get(requester.socketId);
                 if (reqSocket) {
@@ -321,7 +345,6 @@ io.on('connection', (socket) => {
         socket.emit('friends_status', friendsData);
     });
 
-    // Explicit profile refresh for clients
     socket.on('refresh_profile', () => {
         socket.emit('profile_update', USERS[socket.user.id]);
     });
@@ -353,13 +376,12 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // Create Friendly Room with dummy match end logic for Friendly
         const roomId = uuidv4();
-        const room = new GameRoom(roomId, p1, p2, io, () => {}); // No reward callback
-        room.isFriendly = true; // MARK AS FRIENDLY
-        ROOMS[roomId] = room; // Store in friendly list
+        // Create room without onMatchEnd callback (no rewards)
+        const room = new GameRoom(roomId, p1, p2, io, () => {}); 
+        room.isFriendly = true;
+        ROOMS[roomId] = room; // Store in global ROOMS
         
-        // Join Sockets
         const s1 = io.sockets.sockets.get(p1.socketId);
         const s2 = socket; 
 
@@ -368,16 +390,18 @@ io.on('connection', (socket) => {
 
         console.log(`⚔️ Friendly Battle Started: ${p1.name} vs ${p2.name} (Room: ${roomId})`);
         
-        // Broadcast Start
-        io.to(roomId).emit('game_start', { 
+        const startData = { 
             players: { 
                 [p1.id]: { ...p1, team: 'PLAYER' }, 
                 [p2.id]: { ...p2, team: 'ENEMY' } 
             },
+            player1Id: p1.id,
+            player2Id: p2.id,
             endTime: Date.now() + 180000,
             isFriendly: true
-        });
+        };
 
+        io.to(roomId).emit('game_start', startData);
         room.start();
     });
 
@@ -414,18 +438,14 @@ io.on('connection', (socket) => {
     });
 
     socket.on('create_clan', ({ name, description }) => {
-        console.log(`[Clan] Request to create clan '${name}' from ${socket.user.username}`);
-
         if (!name || name.trim().length < 3) {
              socket.emit('error', 'Clan name must be 3+ chars');
              return;
         }
-
         if (socket.user.clanId) {
             socket.emit('error', 'You are already in a clan');
             return;
         }
-        
         if (Object.values(CLANS).find(c => c.name === name)) {
             socket.emit('error', 'Clan name taken');
             return;
@@ -441,22 +461,13 @@ io.on('connection', (socket) => {
         };
 
         CLANS[clanId] = newClan;
-        
-        // IMPORTANT: Update Server Memory
         socket.user.clanId = clanId;
-        if (USERS[socket.user.id]) {
-            USERS[socket.user.id].clanId = clanId;
-        }
+        if (USERS[socket.user.id]) USERS[socket.user.id].clanId = clanId;
 
         socket.join(clanId);
-        
-        // Notify Creator
         socket.emit('clan_joined', newClan);
         socket.emit('success', `Clan '${name}' created!`);
         
-        console.log(`[Clan] Clan created: ${name} (${clanId}). Leader: ${socket.user.username}`);
-
-        // Broadcast list update to everyone
         io.emit('clan_list', Object.values(CLANS).map(c => ({
             id: c.id,
             name: c.name,
@@ -474,12 +485,8 @@ io.on('connection', (socket) => {
         } 
 
         clan.members.push(socket.user.id);
-        
-        // Update Server Memory
         socket.user.clanId = clanId;
-        if (USERS[socket.user.id]) {
-            USERS[socket.user.id].clanId = clanId;
-        }
+        if (USERS[socket.user.id]) USERS[socket.user.id].clanId = clanId;
 
         socket.join(clanId);
         socket.emit('clan_joined', clan);
@@ -496,7 +503,6 @@ io.on('connection', (socket) => {
         clan.messages.push(sysMsg);
         io.to(clanId).emit('clan_message', sysMsg);
         
-        // Broadcast list update (member count changed)
         io.emit('clan_list', Object.values(CLANS).map(c => ({
             id: c.id,
             name: c.name,
@@ -512,11 +518,8 @@ io.on('connection', (socket) => {
         const clan = CLANS[clanId];
         clan.members = clan.members.filter(id => id !== socket.user.id);
         
-        // Update Server Memory
         socket.user.clanId = null;
-        if (USERS[socket.user.id]) {
-            USERS[socket.user.id].clanId = null;
-        }
+        if (USERS[socket.user.id]) USERS[socket.user.id].clanId = null;
         
         socket.leave(clanId);
         socket.emit('clan_left');
@@ -537,7 +540,6 @@ io.on('connection', (socket) => {
             io.to(clanId).emit('clan_message', sysMsg);
         }
         
-        // Broadcast list update
         io.emit('clan_list', Object.values(CLANS).map(c => ({
             id: c.id,
             name: c.name,
@@ -580,21 +582,17 @@ io.on('connection', (socket) => {
 
     // --- Gameplay ---
     const onMatchEnd = (winnerId, playersMap, isFriendly) => {
-        // Handle Economy (Chests + Gold)
         if (isFriendly || !winnerId) return;
 
         const winner = USERS[winnerId];
         if (!winner) return;
 
-        // Gold Reward (Win = 15-30 Gold)
         const goldWon = Math.floor(Math.random() * 15) + 15;
         winner.gold += goldWon;
-        winner.trophies = Math.max(0, winner.trophies + 30); // Ensure trophy sync
+        winner.trophies = Math.max(0, winner.trophies + 30); 
 
-        // Chest Reward
         grantChest(winner);
 
-        // Notify client to update profile immediately
         const winnerSocket = io.sockets.sockets.get(winner.socketId);
         if (winnerSocket) {
              winnerSocket.emit('profile_update', winner);
@@ -606,21 +604,17 @@ io.on('connection', (socket) => {
     });
 
     socket.on('game_input', (data) => {
-        // Robust Room Lookup: Check matchmaking rooms first, then friendly rooms
-        // We use User ID, not Socket ID, for stability
         const userId = socket.user.id;
         
         let room = getRoomByUserId(userId);
         
         if (!room) {
-             // Check friendly rooms
+             // Look in friendly rooms
              room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(userId));
         }
 
         if (room) {
             room.handleInput(userId, data);
-        } else {
-            console.warn(`[GameInput] No room found for user ${userId}`);
         }
     });
 
@@ -628,6 +622,10 @@ io.on('connection', (socket) => {
         console.log(`❌ Desconectado: ${socket.user.username} (${socket.id})`);
         notifyFriendsStatus(socket.user.id, false);
         cleanupUser(socket.user.id, socket.id);
+        
+        // Remove empty friendly rooms? 
+        // Logic: if friendly room has no connected players, delete it.
+        // For simplicity in this version, room cleans up on endGame or when both leave.
     });
 });
 
@@ -646,7 +644,6 @@ function notifyFriendsStatus(userId, isOnline) {
     });
 }
 
-// Start
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
