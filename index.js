@@ -94,7 +94,10 @@ app.post('/api/auth/register', (req, res) => {
         isBanned: false,
         banExpires: null,
         isAdmin: false,
-        logs: []
+        logs: [],
+        description: "Ready for battle!",
+        bannerId: "bg-gradient-to-r from-blue-600 to-blue-400",
+        badges: []
     };
 
     USERS[id] = newUser;
@@ -138,6 +141,31 @@ app.get('/api/auth/profile', (req, res) => {
     if (user) {
         if (user.isBanned) return res.status(403).json({ message: "Account Banned" });
         res.json(user);
+    } else {
+        res.status(401).json({ message: "Invalid Token" });
+    }
+});
+
+app.put('/api/auth/updateProfile', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = USERS[token];
+    const { name, description, bannerId, badges } = req.body;
+
+    if (user) {
+        // Name Logic
+        if (name && name !== user.name) {
+            const exists = Object.values(USERS).find(u => (u.username === name || u.name === name) && u.id !== user.id);
+            if (exists) return res.status(400).json({ message: "Name already taken" });
+            user.name = name;
+            user.username = name;
+        }
+        
+        if (description !== undefined) user.description = description;
+        if (bannerId !== undefined) user.bannerId = bannerId;
+        if (badges !== undefined) user.badges = badges;
+
+        logUserActivity(user.id, 'UPDATE_PROFILE', 'Edited Profile');
+        res.json({ success: true, profile: user });
     } else {
         res.status(401).json({ message: "Invalid Token" });
     }
@@ -1152,7 +1180,7 @@ io.on('connection', (socket) => {
         if (room) {
             room.handleInput(userId, data);
         } else {
-            console.log(`[Server] Game Input Ignored: No room found for user ${userId}. (Is it a friendly match that failed lookup?)`);
+            console.log(`[Server] Game Input Ignored: No room found for user ${userId}.`);
         }
     });
 
@@ -1161,12 +1189,9 @@ io.on('connection', (socket) => {
         notifyFriendsStatus(socket.user.id, false);
         cleanupUser(socket.user.id, socket.id);
         
-        // Cleanup Friendly Rooms (Simple approach: if anyone leaves, room dies)
-        // In a real app you might handle reconnects.
         Object.keys(ROOMS).forEach(roomId => {
             const r = ROOMS[roomId];
             if (r.players[socket.user.id]) {
-                console.log(`[Server] Cleaning up friendly room ${roomId} due to disconnect`);
                 delete ROOMS[roomId];
             }
         });
