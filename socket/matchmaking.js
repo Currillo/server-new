@@ -6,7 +6,7 @@ let queue = []; // Array of { id, username, socketId, ... }
 const rooms = {}; // roomId -> GameRoom
 
 // Matchmaking Logic
-const handleMatchmaking = (io, socket, user) => {
+const handleMatchmaking = (io, socket, user, onMatchEnd) => {
     // 1. Remove from queue if already there (avoid duplicates)
     queue = queue.filter(u => u.id !== user.id);
 
@@ -33,8 +33,8 @@ const handleMatchmaking = (io, socket, user) => {
             
             console.log(`⚔️ MATCH FOUND: ${p1.username} vs ${p2.username} (Room: ${roomId})`);
 
-            // Create Room
-            const room = new GameRoom(roomId, p1, p2, io);
+            // Create Room with callback for economy
+            const room = new GameRoom(roomId, p1, p2, io, onMatchEnd);
             rooms[roomId] = room;
             room.start();
         } else {
