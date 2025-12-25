@@ -63,6 +63,20 @@ class GameRoom {
           }
       });
   }
+
+  addSpectator(socket) {
+      socket.join(this.roomId);
+      // Emit game_start to the spectator so their client initializes the engine
+      socket.emit('game_start', {
+          players: this.players,
+          player1Id: this.player1Id,
+          player2Id: this.player2Id,
+          endTime: Date.now() + (this.gameState.time * 1000),
+          isFriendly: this.isFriendly,
+          spectating: true
+      });
+      console.log(`[GameRoom] Spectator ${socket.user.username} joined room ${this.roomId}`);
+  }
   // ---------------------
 
   spawnTowers(playerId, side) {
@@ -250,11 +264,7 @@ class GameRoom {
         }
     } else {
         // No target? Move towards enemy King Tower end
-        // Player 1 (Bottom, ID in players[0] key usually) -> goes to Y=32
-        // Player 2 (Top) -> goes to Y=0
-        
         const isPlayer1 = ent.ownerId === this.player1Id;
-        
         const bridgeY = ARENA_HEIGHT / 2;
         const targetY = isPlayer1 ? ARENA_HEIGHT - 2.5 : 2.5;
 
@@ -424,18 +434,33 @@ class GameRoom {
       if (this.gameState.gameOver) return;
 
       const card = CARDS[cardId];
-      if (!card) return;
+      if (!card) {
+          console.log(`[GameRoom] handleInput failed: Invalid Card ${cardId}`);
+          return;
+      }
       
       // Allow slight floating point tolerance for Elixir
-      if (!bypassCost && this.gameState.elixir[playerId] < card.cost - 0.1) return;
+      if (!bypassCost && this.gameState.elixir[playerId] < card.cost - 0.1) {
+          console.log(`[GameRoom] handleInput failed: Not enough elixir ${playerId} needs ${card.cost} has ${this.gameState.elixir[playerId]}`);
+          return;
+      }
 
-      // Validate Side (skip validation if admin spawn)
+      // Validate Side (skip validation if admin spawn or spell)
       const isPlayer1 = playerId === this.player1Id;
       const bridgeY = ARENA_HEIGHT / 2;
       
-      if (!bypassCost && card.type !== 'SPELL' && card.stats.projectileType !== 'LOG') {
-          if (isPlayer1 && y > bridgeY) return;
-          if (!isPlayer1 && y < bridgeY) return;
+      // Goblin Barrel and Miner can spawn anywhere (we simulate goblin_barrel check via name or added prop in future)
+      const isGlobalSpawn = card.id === 'goblin_barrel' || card.type === 'SPELL';
+
+      if (!bypassCost && !isGlobalSpawn && card.stats.projectileType !== 'LOG') {
+          if (isPlayer1 && y > bridgeY) {
+              console.log(`[GameRoom] handleInput failed: P1 tried to spawn at ${y} (Enemy Side)`);
+              return;
+          }
+          if (!isPlayer1 && y < bridgeY) {
+              console.log(`[GameRoom] handleInput failed: P2 tried to spawn at ${y} (Enemy Side)`);
+              return;
+          }
       }
 
       if (!bypassCost && !this.godModes[playerId]) {
@@ -524,6 +549,11 @@ class GameRoom {
       if (count === 1) return [{x:0, y:0}];
       if (count === 2) return [{x:-0.5, y:0}, {x:0.5, y:0}];
       if (count === 3) return [{x:0, y:0.8}, {x:-0.7, y:-0.4}, {x:0.7, y:-0.4}]; 
+      if (count === 6) return [
+          {x:-0.5, y:0.5}, {x:0.5, y:0.5},
+          {x:-0.5, y:-0.5}, {x:0.5, y:-0.5},
+          {x:-1.0, y:0}, {x:1.0, y:0}
+      ];
       return Array.from({length: count}, (_, i) => ({ x: (Math.random()-0.5)*1.5, y: (Math.random()-0.5)*1.5 }));
   }
 
