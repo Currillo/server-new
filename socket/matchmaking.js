@@ -70,7 +70,7 @@ const cleanupUser = (userId, socketId) => {
     if (room && !room.gameState.gameOver) {
         console.log(`[Matchmaking] User disconnected during match. Ending Room ${room.roomId}`);
         const winnerId = Object.keys(room.players).find(pid => pid !== userId);
-        room.endGame(winnerId);
+        room.endGame(winnerId, 'OPPONENT_LEFT');
         
         // Remove room reference after a short delay
         setTimeout(() => {
