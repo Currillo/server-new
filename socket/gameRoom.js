@@ -47,6 +47,8 @@ class GameRoom {
       entities: [],
       projectiles: []
     };
+    
+    this.effectQueue = []; // Accumulate effects to broadcast
 
     this.spawnTowers(player1.id, 'BOTTOM');
     this.spawnTowers(player2.id, 'TOP');
@@ -59,6 +61,16 @@ class GameRoom {
       const entry = `[${Math.floor(180 - this.gameState.time)}s] ${action}: ${detail}`;
       this.matchLog.push(entry);
       // console.log(`[Room ${this.roomId}] ${entry}`);
+  }
+
+  pushEffect(type, position, ownerId, scale = 1) {
+      this.effectQueue.push({
+          id: uuidv4(),
+          type,
+          position: { ...position },
+          ownerId,
+          scale
+      });
   }
 
   // --- Admin Methods ---
@@ -269,7 +281,11 @@ class GameRoom {
                     ent.hp = ent.maxHp; // Heal instantly
                 } else {
                     ent.state = 'DYING';
-                    ent.deathTimer = 1.0; 
+                    ent.deathTimer = 1.0;
+                    
+                    // VFX: Death & Elixir
+                    this.pushEffect('DEATH', ent.position, ent.ownerId);
+                    this.pushEffect('ELIXIR_STAIN', ent.position, ent.ownerId);
                     
                     if (ent.defId === 'tower_king') {
                         const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
@@ -284,8 +300,13 @@ class GameRoom {
             time: this.gameState.time,
             elixir: this.gameState.elixir,
             entities: this.gameState.entities,
-            projectiles: this.gameState.projectiles
+            projectiles: this.gameState.projectiles,
+            effects: this.effectQueue // Broadcast gathered effects
         });
+        
+        // Clear effects after broadcast
+        this.effectQueue = [];
+
     } catch (e) {
         console.error(`[GameRoom] Error in update loop: ${e.message}`);
     }
@@ -434,6 +455,7 @@ class GameRoom {
       } else {
           // Instant Melee
           if (stats.splashRadius > 0) {
+              this.pushEffect('SPARKS', source.position, source.ownerId, 1.2); // VFX
               this.gameState.entities.forEach(e => {
                   if (e.ownerId !== source.ownerId && e.state !== 'DYING') {
                       const d2 = (e.position.x - source.position.x)**2 + (e.position.y - source.position.y)**2;
@@ -444,6 +466,7 @@ class GameRoom {
               });
           } else {
               target.hp -= stats.damage;
+              this.pushEffect('SPARKS', target.position, source.ownerId); // VFX
           }
       }
   }
@@ -473,6 +496,7 @@ class GameRoom {
                             if (d2 < (p.splashRadius)**2) {
                                 e.hp -= p.damage;
                                 p.hitList.push(e.id);
+                                this.pushEffect('DUST', e.position, p.ownerId); // VFX
                                 if (p.knockback) {
                                      e.position.x += dirX * p.knockback;
                                      e.position.y += dirY * p.knockback;
@@ -487,6 +511,7 @@ class GameRoom {
                const distTraveled = p.startPos ? Math.sqrt((p.position.x - p.startPos.x)**2 + (p.position.y - p.startPos.y)**2) : 999;
                if (distTraveled >= (p.maxRange || 10)) {
                    this.gameState.projectiles.splice(i, 1);
+                   this.pushEffect('LOG_BREAK', p.position, p.ownerId); // VFX
                }
                continue;
           }
@@ -505,6 +530,7 @@ class GameRoom {
               
               // Goblin Barrel Spawn Logic
               if (p.type === 'BARREL' && p.spawnUnitId) {
+                  this.pushEffect('EXPLOSION', p.targetPos, p.ownerId, 1.5); // VFX
                   const count = p.spawnCount || 3;
                   const offsets = [
                       {x: 0, y: -0.8}, {x: -0.7, y: 0.4}, {x: 0.7, y: 0.4}
@@ -525,6 +551,13 @@ class GameRoom {
               }
 
               if (p.splashRadius > 0) {
+                  // Area VFX
+                  if (p.type === 'ZAP') {
+                      this.pushEffect('ZAP', p.targetPos, p.ownerId, 2);
+                  } else {
+                      this.pushEffect('EXPLOSION', p.targetPos, p.ownerId, p.splashRadius);
+                  }
+
                   this.gameState.entities.forEach(e => {
                     if (e.ownerId !== p.ownerId && e.state !== 'DYING') {
                         const d2 = (e.position.x - p.targetPos.x)**2 + (e.position.y - p.targetPos.y)**2;
@@ -545,6 +578,7 @@ class GameRoom {
                   const target = this.gameState.entities.find(e => e.id === p.targetId);
                   if (target) {
                       target.hp -= p.damage;
+                      this.pushEffect('SPARKS', p.targetPos, p.ownerId); // VFX
                       if (p.stunDuration) target.stunTimer = p.stunDuration;
                   }
               }
@@ -679,6 +713,7 @@ class GameRoom {
 
               if (ent) {
                   this.gameState.entities.push(ent);
+                  this.pushEffect('SPAWN', ent.position, ent.ownerId); // VFX
 
                   // Spawn Damage (E-Wiz)
                   if (card.stats.spawnDamage) {
@@ -691,17 +726,7 @@ class GameRoom {
                             }
                         });
                         // Visual
-                        this.gameState.projectiles.push({
-                            id: uuidv4(),
-                            ownerId: playerId,
-                            targetId: null,
-                            targetPos: ent.position,
-                            damage: 0,
-                            speed: 0,
-                            position: ent.position,
-                            splashRadius: 0,
-                            type: 'ZAP'
-                        });
+                        this.pushEffect('ZAP', ent.position, ent.ownerId, 1.5);
                   }
               }
           });
@@ -724,7 +749,7 @@ class GameRoom {
       return Array.from({length: count}, (_, i) => ({ x: (Math.random()-0.5)*1.5, y: (Math.random()-0.5)*1.5 }));
   }
 
-  endGame(winnerId) {
+  endGame(winnerId, reason) {
       if (this.gameState.gameOver) return;
       
       this.gameState.gameOver = true;
@@ -743,9 +768,10 @@ class GameRoom {
       
       this.io.to(this.roomId).emit('game_over', { 
           winnerId,
+          reason,
           trophyChange // Clients can use this if they want authoritative data
       });
-      console.log(`[Room ${this.roomId}] Game Over. Winner: ${winnerId}, Trophies: ${trophyChange}`);
+      console.log(`[Room ${this.roomId}] Game Over. Winner: ${winnerId}, Reason: ${reason}, Trophies: ${trophyChange}`);
       
       clearInterval(this.intervalId);
   }
