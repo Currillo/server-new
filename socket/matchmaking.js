@@ -52,6 +52,13 @@ const getRoomByUserId = (userId) => {
     );
 };
 
+const removeRoom = (roomId) => {
+    if (rooms[roomId]) {
+        delete rooms[roomId];
+        console.log(`[Matchmaking] Room ${roomId} manually removed.`);
+    }
+};
+
 const cleanupUser = (userId, socketId) => {
     // Remove from queue
     const queueIndex = queue.findIndex(u => u.id === userId);
@@ -82,4 +89,4 @@ const cleanupUser = (userId, socketId) => {
     }
 };
 
-module.exports = { handleMatchmaking, getRoomByUserId, cleanupUser };
+module.exports = { handleMatchmaking, getRoomByUserId, removeRoom, cleanupUser };
