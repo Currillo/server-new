@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -8,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 // Modules
 const { handleMatchmaking, getRoomByUserId, cleanupUser } = require('./socket/matchmaking');
 const GameRoom = require('./socket/gameRoom'); // Import directly for friendly battles
-const { CARDS } = require('./gameData');
+const { CARDS, UPGRADE_COSTS, CARDS_REQUIRED } = require('./gameData');
 
 // --- In-Memory Database ---
 const USERS = {}; // id -> UserProfile
@@ -22,6 +23,23 @@ const server = http.createServer(app);
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// --- Economy Helpers ---
+
+const grantChest = (user) => {
+    if (user.chests.length >= 4) return false;
+    
+    // Simple logic: 70% Silver, 30% Gold
+    const isGold = Math.random() > 0.7;
+    const chest = {
+        id: uuidv4(),
+        type: isGold ? 'GOLD' : 'SILVER',
+        unlockTime: null,
+        isReady: false
+    };
+    user.chests.push(chest);
+    return true;
+};
+
 // --- Mock API Routes ---
 
 app.post('/api/auth/register', (req, res) => {
@@ -29,12 +47,16 @@ app.post('/api/auth/register', (req, res) => {
     const id = uuidv4();
     
     // Default Starter Cards
-    const starterCards = Object.keys(CARDS).map(key => ({
-        id: key, 
-        level: 1, 
-        count: 0 
-    }));
+    // Initialize ALL cards to 0 count, level 1, but mark starter deck as owned
+    // Actually simpler: just give starter cards with count 0
+    const starterCardIds = ['knight', 'archers', 'giant', 'musketeer', 'fireball', 'mini_pekka', 'baby_dragon', 'prince'];
     
+    const ownedCards = {};
+    Object.keys(CARDS).forEach(key => {
+        const isStarter = starterCardIds.includes(key);
+        ownedCards[key] = { level: 1, count: isStarter ? 0 : 0 };
+    });
+
     const newUser = {
         _id: id,
         id: id,
@@ -48,8 +70,9 @@ app.post('/api/auth/register', (req, res) => {
         clanId: null,
         friends: [],
         friendRequests: [],
-        ownedCards: starterCards,
-        currentDeck: ['knight', 'archers', 'giant', 'musketeer', 'fireball', 'mini_pekka', 'baby_dragon', 'prince']
+        ownedCards: ownedCards,
+        currentDeck: [...starterCardIds],
+        chests: []
     };
 
     USERS[id] = newUser;
@@ -97,8 +120,70 @@ app.put('/api/auth/deck', (req, res) => {
     }
 });
 
-app.post('/api/player/upgrade', (req, res) => res.json({ success: false, message: "Not implemented in simple server" }));
-app.post('/api/player/shop/buy', (req, res) => res.json({ success: false, message: "Not implemented in simple server" }));
+app.post('/api/player/upgrade', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = USERS[token];
+    const { cardId } = req.body;
+
+    if (!user || !user.ownedCards[cardId]) return res.status(400).json({ message: "Invalid Request" });
+
+    const card = user.ownedCards[cardId];
+    if (card.level >= 16) return res.status(400).json({ message: "Max level reached" });
+
+    const cost = UPGRADE_COSTS[card.level];
+    const reqCards = CARDS_REQUIRED[card.level];
+
+    if (user.gold < cost) return res.status(400).json({ message: "Not enough gold" });
+    if (card.count < reqCards) return res.status(400).json({ message: "Not enough cards" });
+
+    // Execute
+    user.gold -= cost;
+    card.count -= reqCards;
+    card.level++;
+    user.xp += 10 * card.level;
+
+    // Simple Level Up Logic
+    if (user.xp >= user.level * 500) {
+        user.xp -= user.level * 500;
+        user.level++;
+    }
+
+    res.json({ success: true, profile: user });
+});
+
+app.post('/api/player/chest/open', (req, res) => {
+    const token = req.headers.authorization?.split(' ')[1];
+    const user = USERS[token];
+    const { chestId } = req.body;
+    
+    if (!user) return res.status(401).send();
+    
+    const idx = user.chests.findIndex(c => c.id === chestId);
+    if (idx === -1) return res.status(404).json({ message: "Chest not found" });
+
+    // For demo: Instant open (no timer needed)
+    const chest = user.chests[idx];
+    user.chests.splice(idx, 1);
+
+    const isGold = chest.type === 'GOLD';
+    const goldReward = isGold ? 200 : 50;
+    const cardsCount = isGold ? 20 : 5;
+    
+    // Rewards
+    user.gold += goldReward;
+
+    // Random Cards
+    const allCardIds = Object.keys(CARDS).filter(id => !id.startsWith('tower_'));
+    for(let i=0; i<cardsCount; i++) {
+        const randId = allCardIds[Math.floor(Math.random() * allCardIds.length)];
+        if (!user.ownedCards[randId]) {
+            user.ownedCards[randId] = { level: 1, count: 0 };
+        }
+        user.ownedCards[randId].count++;
+    }
+
+    res.json({ success: true, profile: user, rewards: { gold: goldReward, cards: cardsCount } });
+});
 
 
 // --- Socket.IO Setup ---
@@ -268,9 +353,10 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // Create Friendly Room
+        // Create Friendly Room with dummy match end logic for Friendly
         const roomId = uuidv4();
-        const room = new GameRoom(roomId, p1, p2, io);
+        const room = new GameRoom(roomId, p1, p2, io, () => {}); // No reward callback
+        room.isFriendly = true; // MARK AS FRIENDLY
         ROOMS[roomId] = room; // Store in friendly list
         
         // Join Sockets
@@ -438,8 +524,30 @@ io.on('connection', (socket) => {
     });
 
     // --- Gameplay ---
+    const onMatchEnd = (winnerId, playersMap, isFriendly) => {
+        // Handle Economy (Chests + Gold)
+        if (isFriendly || !winnerId) return;
+
+        const winner = USERS[winnerId];
+        if (!winner) return;
+
+        // Gold Reward (Win = 15-30 Gold)
+        const goldWon = Math.floor(Math.random() * 15) + 15;
+        winner.gold += goldWon;
+        winner.trophies = Math.max(0, winner.trophies + 30); // Ensure trophy sync
+
+        // Chest Reward
+        grantChest(winner);
+
+        // Notify client to update profile immediately
+        const winnerSocket = io.sockets.sockets.get(winner.socketId);
+        if (winnerSocket) {
+             winnerSocket.emit('profile_update', winner);
+        }
+    };
+
     socket.on('join_queue', () => {
-        handleMatchmaking(io, socket, USERS[socket.user.id]);
+        handleMatchmaking(io, socket, USERS[socket.user.id], onMatchEnd);
     });
 
     socket.on('game_input', (data) => {
