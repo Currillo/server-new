@@ -23,6 +23,10 @@ class GameRoom {
     this.player2Id = player2.id; // Top Player
     this.isFriendly = false; // Flag to determine if stats should update
 
+    // Admin Overrides
+    this.godModes = {}; // userId -> boolean
+    this.invincibility = {}; // userId -> boolean
+
     // P1 is "Bottom" (y=0..16 visually for them), P2 is "Top"
     // Server coordinates are absolute 0..32.
     // P1 Base at y=0, P2 Base at y=32.
@@ -42,6 +46,24 @@ class GameRoom {
     this.intervalId = null;
     this.lastTime = Date.now();
   }
+
+  // --- Admin Methods ---
+  setGodMode(userId, enabled) {
+      this.godModes[userId] = enabled;
+  }
+
+  setInvincibility(userId, enabled) {
+      this.invincibility[userId] = enabled;
+  }
+
+  destroyTowers(ownerId) {
+      this.gameState.entities.forEach(e => {
+          if (e.ownerId === ownerId && e.defId.startsWith('tower')) {
+              e.hp = 0;
+          }
+      });
+  }
+  // ---------------------
 
   spawnTowers(playerId, side) {
     const yPrincess = side === 'BOTTOM' ? 6.5 : ARENA_HEIGHT - 6.5;
@@ -110,7 +132,12 @@ class GameRoom {
 
     Object.keys(this.players).forEach(pid => {
       const rate = this.gameState.time <= 60 ? ELIXIR_RATE / 2 : ELIXIR_RATE;
-      this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, this.gameState.elixir[pid] + dt / rate);
+      // God Mode Override
+      if (this.godModes[pid]) {
+          this.gameState.elixir[pid] = MAX_ELIXIR;
+      } else {
+          this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, this.gameState.elixir[pid] + dt / rate);
+      }
     });
 
     // 2. Projectiles
@@ -144,14 +171,19 @@ class GameRoom {
         this.updateEntity(ent, dt);
         
         if (ent.hp <= 0) {
-            // Transition to DYING instead of removing immediately
-            ent.state = 'DYING';
-            ent.deathTimer = 1.0; // 1 second visual decay
-            
-            if (ent.defId === 'tower_king') {
-                const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
-                this.endGame(winnerId);
-                // Do NOT return here, allow the DYING state to be broadcast in the final frame
+            // Invincibility Override
+            if (this.invincibility[ent.ownerId]) {
+                ent.hp = ent.maxHp; // Heal instantly
+            } else {
+                // Transition to DYING instead of removing immediately
+                ent.state = 'DYING';
+                ent.deathTimer = 1.0; // 1 second visual decay
+                
+                if (ent.defId === 'tower_king') {
+                    const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
+                    this.endGame(winnerId);
+                    // Do NOT return here, allow the DYING state to be broadcast in the final frame
+                }
             }
         }
     }
@@ -406,7 +438,7 @@ class GameRoom {
           if (!isPlayer1 && y < bridgeY) return;
       }
 
-      if (!bypassCost) {
+      if (!bypassCost && !this.godModes[playerId]) {
           this.gameState.elixir[playerId] -= card.cost;
       }
 
