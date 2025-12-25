@@ -23,6 +23,21 @@ const server = http.createServer(app);
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// --- Helper: Activity Logger ---
+const logUserActivity = (userId, action, detail) => {
+    const user = USERS[userId];
+    if (user) {
+        if (!user.logs) user.logs = [];
+        user.logs.unshift({
+            timestamp: Date.now(),
+            action,
+            detail
+        });
+        // Keep logs manageable
+        if (user.logs.length > 50) user.logs.pop();
+    }
+};
+
 // --- Economy Helpers ---
 
 const grantChest = (user) => {
@@ -41,6 +56,7 @@ const grantChest = (user) => {
         unlockFinishTime: null
     };
     user.chests.push(chest);
+    logUserActivity(user.id, 'CHEST_EARNED', `Type: ${type}`);
     return true;
 };
 
@@ -76,10 +92,13 @@ app.post('/api/auth/register', (req, res) => {
         currentDeck: [...starterCardIds],
         chests: [],
         isBanned: false,
-        isAdmin: false
+        banExpires: null,
+        isAdmin: false,
+        logs: []
     };
 
     USERS[id] = newUser;
+    logUserActivity(id, 'REGISTER', 'Account Created');
 
     res.json({
         token: id, 
@@ -93,8 +112,17 @@ app.post('/api/auth/login', (req, res) => {
     
     if (user) {
         if (user.isBanned) {
-            return res.status(403).json({ message: "Account is banned." });
+            if (user.banExpires && Date.now() < user.banExpires) {
+                const remaining = Math.ceil((user.banExpires - Date.now()) / 60000);
+                return res.status(403).json({ message: `Account banned for ${remaining} minutes.` });
+            } else if (!user.banExpires) {
+                return res.status(403).json({ message: "Account is permanently banned." });
+            }
+            // Ban expired
+            user.isBanned = false;
+            user.banExpires = null;
         }
+        logUserActivity(user.id, 'LOGIN', 'User Logged In');
         res.json({
             token: user.id,
             profile: user
@@ -122,6 +150,7 @@ app.put('/api/auth/deck', (req, res) => {
 
     if (user && deck && deck.length === 8) {
         user.currentDeck = deck;
+        logUserActivity(user.id, 'DECK_UPDATE', 'Deck Modified');
         res.json({ success: true, currentDeck: deck });
     } else {
         res.status(400).json({ message: "Invalid request" });
@@ -154,8 +183,10 @@ app.post('/api/player/upgrade', (req, res) => {
     if (user.xp >= user.level * 500) {
         user.xp -= user.level * 500;
         user.level++;
+        logUserActivity(user.id, 'LEVEL_UP', `Reached Level ${user.level}`);
     }
 
+    logUserActivity(user.id, 'UPGRADE', `Upgraded ${cardId} to Lv.${card.level}`);
     res.json({ success: true, profile: user });
 });
 
@@ -181,7 +212,8 @@ app.post('/api/player/chest/unlock', (req, res) => {
 
     chest.status = 'UNLOCKING';
     chest.unlockFinishTime = Date.now() + duration;
-
+    
+    logUserActivity(user.id, 'CHEST_UNLOCK', `Started unlock for ${chest.type}`);
     res.json({ success: true, profile: user });
 });
 
@@ -232,7 +264,8 @@ app.post('/api/player/chest/open', (req, res) => {
 
     // Remove chest
     user.chests.splice(idx, 1);
-
+    
+    logUserActivity(user.id, 'CHEST_OPEN', `Opened ${chest.type}, Gold: ${gold}`);
     res.json({ success: true, profile: user, rewards });
 });
 
@@ -320,9 +353,20 @@ io.on('connection', (socket) => {
                 socket.emit('admin_data', { type: 'SERVER_STATS', payload: stats });
                 break;
 
+            case 'GET_PLAYER_DETAILS':
+                if (targetUser) {
+                    socket.emit('admin_data', { type: 'PLAYER_DETAILS', payload: targetUser });
+                }
+                break;
+
             case 'BAN_USER':
                 if (targetUser) {
                     targetUser.isBanned = true;
+                    // Duration in minutes, defaults to permanent (null)
+                    targetUser.banExpires = payload.duration ? Date.now() + (payload.duration * 60000) : null;
+                    
+                    logUserActivity(targetUser.id, 'BANNED', `By Admin ${socket.user.username} for ${payload.duration || 'forever'}m`);
+
                     // Force disconnect
                     if (targetUser.socketId) {
                         const targetSocket = io.sockets.sockets.get(targetUser.socketId);
@@ -332,21 +376,39 @@ io.on('connection', (socket) => {
                         }
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Banned user ${targetUser.username}` });
-                } else {
-                    socket.emit('admin_data', { type: 'LOG', payload: `Error: User not found for BAN` });
                 }
                 break;
 
             case 'KICK_USER':
                 if (targetUser && targetUser.socketId) {
+                    logUserActivity(targetUser.id, 'KICKED', `By Admin ${socket.user.username}`);
                     const targetSocket = io.sockets.sockets.get(targetUser.socketId);
                     if (targetSocket) {
                         targetSocket.emit('force_logout');
                         targetSocket.disconnect(true);
                         socket.emit('admin_data', { type: 'LOG', payload: `Kicked user ${targetUser.username}` });
                     }
-                } else {
-                    socket.emit('admin_data', { type: 'LOG', payload: `Error: User not online or found for KICK` });
+                }
+                break;
+
+            case 'DELETE_USER':
+                if (targetUser) {
+                    const tId = targetUser.id;
+                    // Kick first
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) {
+                            ts.emit('force_logout');
+                            ts.disconnect(true);
+                        }
+                    }
+                    // Clean references
+                    cleanupUser(tId, targetUser.socketId);
+                    // Remove
+                    delete USERS[tId];
+                    socket.emit('admin_data', { type: 'LOG', payload: `Deleted user ${targetUser.username}` });
+                    // Refresh list
+                    socket.emit('admin_action', { action: 'GET_STATS' });
                 }
                 break;
 
@@ -359,11 +421,12 @@ io.on('connection', (socket) => {
                     targetUser.xp = 0;
                     targetUser.ownedCards = {};
                     targetUser.chests = [];
-                    // Reset Deck
                     const starterCardIds = ['knight', 'archers', 'giant', 'musketeer', 'fireball', 'mini_pekka', 'baby_dragon', 'prince'];
                     starterCardIds.forEach(id => targetUser.ownedCards[id] = { level: 1, count: 0 });
                     targetUser.currentDeck = [...starterCardIds];
                     
+                    logUserActivity(targetUser.id, 'RESET', `By Admin ${socket.user.username}`);
+
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
                         if (ts) ts.emit('profile_update', targetUser);
@@ -376,6 +439,7 @@ io.on('connection', (socket) => {
                 if (targetUser) {
                     targetUser.gold = (targetUser.gold || 0) + (payload.gold || 0);
                     targetUser.gems = (targetUser.gems || 0) + (payload.gems || 0);
+                    logUserActivity(targetUser.id, 'GIFT', `Gold: ${payload.gold}, Gems: ${payload.gems}`);
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
                         if (ts) ts.emit('profile_update', targetUser);
@@ -393,6 +457,23 @@ io.on('connection', (socket) => {
                         if (ts) ts.emit('profile_update', targetUser);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Set resources for ${targetUser.username}` });
+                }
+                break;
+
+            case 'GIVE_CARD':
+                if (targetUser && payload.cardId && payload.count) {
+                    const cardId = payload.cardId;
+                    const count = payload.count;
+                    if (!targetUser.ownedCards[cardId]) {
+                        targetUser.ownedCards[cardId] = { level: 1, count: 0 };
+                    }
+                    targetUser.ownedCards[cardId].count += count;
+                    logUserActivity(targetUser.id, 'GIFT_CARD', `${count}x ${cardId}`);
+                    if (targetUser.socketId) {
+                        const ts = io.sockets.sockets.get(targetUser.socketId);
+                        if (ts) ts.emit('profile_update', targetUser);
+                    }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Gave ${count} x ${cardId} to ${targetUser.username}` });
                 }
                 break;
 
@@ -421,42 +502,38 @@ io.on('connection', (socket) => {
                             status: 'LOCKED',
                             unlockFinishTime: null
                         });
+                        logUserActivity(targetUser.id, 'GIFT_CHEST', `${payload.type}`);
                         if (targetUser.socketId) {
                             const ts = io.sockets.sockets.get(targetUser.socketId);
                             if (ts) ts.emit('profile_update', targetUser);
                         }
                         socket.emit('admin_data', { type: 'LOG', payload: `Gave chest to ${targetUser.username}` });
-                    } else {
-                        socket.emit('admin_data', { type: 'LOG', payload: `Slots full for ${targetUser.username}` });
                     }
                 }
                 break;
 
             case 'INSTANT_OPEN_CHESTS':
                 if (targetUser) {
-                    let opened = 0;
                     targetUser.chests.forEach(c => {
                         if (c.status !== 'READY') {
                             c.status = 'UNLOCKING';
                             c.unlockFinishTime = Date.now(); // Ready now
-                            opened++;
                         }
                     });
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
                         if (ts) ts.emit('profile_update', targetUser);
                     }
-                    socket.emit('admin_data', { type: 'LOG', payload: `Instant opened ${opened} chests for ${targetUser.username}` });
+                    socket.emit('admin_data', { type: 'LOG', payload: `Instant opened chests for ${targetUser.username}` });
                 }
                 break;
 
+            // --- Gameplay Modifiers ---
+
             case 'TOGGLE_GOD_MODE':
-                // Affects current room logic
                 if (room) {
                     room.setGodMode(adminId, payload.enabled);
                     socket.emit('admin_data', { type: 'LOG', payload: `God Mode ${payload.enabled ? 'ON' : 'OFF'} for match` });
-                } else {
-                    socket.emit('admin_data', { type: 'LOG', payload: `No active match for God Mode` });
                 }
                 break;
             
@@ -464,6 +541,27 @@ io.on('connection', (socket) => {
                 if (room) {
                     room.setInvincibility(adminId, payload.enabled);
                     socket.emit('admin_data', { type: 'LOG', payload: `Invincibility ${payload.enabled ? 'ON' : 'OFF'} for match` });
+                }
+                break;
+
+            case 'FREEZE_PLAYER':
+                if (room && targetUser) {
+                    room.setFrozen(targetUser.id, payload.enabled);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Freeze ${payload.enabled ? 'ON' : 'OFF'} for ${targetUser.username}` });
+                }
+                break;
+
+            case 'SET_ELIXIR_RATE':
+                if (room && targetUser) {
+                    room.setElixirMultiplier(targetUser.id, payload.multiplier || 1.0);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Elixir Rate set to ${payload.multiplier}x for ${targetUser.username}` });
+                }
+                break;
+
+            case 'TOGGLE_AI':
+                if (room && targetUser) {
+                    room.setAI(targetUser.id, payload.enabled);
+                    socket.emit('admin_data', { type: 'LOG', payload: `AI Assistance ${payload.enabled ? 'ON' : 'OFF'} for ${targetUser.username}` });
                 }
                 break;
 
@@ -484,7 +582,6 @@ io.on('connection', (socket) => {
 
             case 'DESTROY_TOWERS':
                 if (room) {
-                    // team: 'ENEMY' or 'PLAYER'
                     const targetOwnerId = payload.team === 'PLAYER' ? adminId : Object.keys(room.players).find(pid => pid !== adminId);
                     if (targetOwnerId) {
                         room.destroyTowers(targetOwnerId);
@@ -495,20 +592,20 @@ io.on('connection', (socket) => {
 
             case 'ADMIN_SPAWN':
                 if (room) {
-                    // Spawn at bridge
+                    // Force spawn at center/bridge
                     const isP1 = room.player1Id === adminId;
-                    const bridgeY = 32 / 2; // ARENA_HEIGHT is 32 in gameData
+                    const bridgeY = 32 / 2; 
                     const spawnY = isP1 ? bridgeY - 2 : bridgeY + 2;
-                    // Note: x=9 is center if width is 18
+                    // Bypass cost checks using the admin spawn logic inside gameRoom
+                    // We call handleInput but with the bypass flag
                     room.handleInput(adminId, { cardId: payload.cardId, x: 9, y: spawnY }, true);
                     socket.emit('admin_data', { type: 'LOG', payload: `Spawned ${payload.cardId}` });
-                } else {
-                    socket.emit('admin_data', { type: 'LOG', payload: `Cannot spawn: No active match` });
                 }
                 break;
 
             case 'BROADCAST':
-                io.emit('success', `SERVER MSG: ${payload.msg}`);
+                // Send to ALL connected sockets
+                io.emit('admin_message', `(ADMIN): ${payload.msg}`);
                 socket.emit('admin_data', { type: 'LOG', payload: `Broadcasted: ${payload.msg}` });
                 break;
 
@@ -520,9 +617,10 @@ io.on('connection', (socket) => {
             
             case 'SEND_MESSAGE':
                 if (targetUser && targetUser.socketId) {
+                    logUserActivity(targetUser.id, 'MSG_RECEIVED', `From Admin: ${payload.message}`);
                     const ts = io.sockets.sockets.get(targetUser.socketId);
                     if (ts) {
-                        ts.emit('admin_message', payload.message);
+                        ts.emit('admin_message', `(ADMIN): ${payload.message}`);
                         socket.emit('admin_data', { type: 'LOG', payload: `Sent message to ${targetUser.username}` });
                     }
                 }
@@ -532,8 +630,6 @@ io.on('connection', (socket) => {
                 if (room) {
                     room.addSpectator(socket);
                     socket.emit('admin_data', { type: 'LOG', payload: `Spectating match ${room.roomId}` });
-                } else {
-                    socket.emit('admin_data', { type: 'LOG', payload: `Match not found for user ${payload.userId}` });
                 }
                 break;
         }
@@ -680,6 +776,9 @@ io.on('connection', (socket) => {
             isFriendly: true
         };
 
+        logUserActivity(p1.id, 'FRIENDLY_MATCH', `vs ${p2.username}`);
+        logUserActivity(p2.id, 'FRIENDLY_MATCH', `vs ${p1.username}`);
+
         io.to(roomId).emit('game_start', startData);
         room.start();
     });
@@ -746,6 +845,7 @@ io.on('connection', (socket) => {
         socket.join(clanId);
         socket.emit('clan_joined', newClan);
         socket.emit('success', `Clan '${name}' created!`);
+        logUserActivity(socket.user.id, 'CREATE_CLAN', name);
         
         io.emit('clan_list', Object.values(CLANS).map(c => ({
             id: c.id,
@@ -770,6 +870,7 @@ io.on('connection', (socket) => {
         socket.join(clanId);
         socket.emit('clan_joined', clan);
         socket.emit('success', 'Joined clan!');
+        logUserActivity(socket.user.id, 'JOIN_CLAN', clan.name);
         
         const sysMsg = {
             id: uuidv4(),
@@ -803,6 +904,7 @@ io.on('connection', (socket) => {
         socket.leave(clanId);
         socket.emit('clan_left');
         socket.emit('success', 'Left clan');
+        logUserActivity(socket.user.id, 'LEAVE_CLAN', clan.name);
 
         if (clan.members.length === 0) {
             delete CLANS[clanId];
@@ -871,6 +973,7 @@ io.on('connection', (socket) => {
         winner.trophies = Math.max(0, winner.trophies + 30); 
 
         grantChest(winner);
+        logUserActivity(winner.id, 'MATCH_WIN', `Gold: ${goldWon}`);
 
         const winnerSocket = io.sockets.sockets.get(winner.socketId);
         if (winnerSocket) {
