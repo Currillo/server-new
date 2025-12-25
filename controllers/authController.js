@@ -1,3 +1,4 @@
+
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
@@ -52,12 +53,21 @@ exports.registerUser = async (req, res) => {
       username: user.username,
       token: generateToken(user.id),
       profile: {
+          _id: user.id,
+          name: user.username,
           gold: user.gold,
           gems: user.gems,
           level: user.level,
           ownedCards: user.ownedCards,
           currentDeck: user.currentDeck,
-          trophies: user.trophies
+          trophies: user.trophies,
+          chests: user.chests,
+          friends: user.friends,
+          friendRequests: user.friendRequests,
+          clanId: user.clanId,
+          description: user.description,
+          bannerId: user.bannerId,
+          badges: user.badges
       }
     });
   } catch (error) {
@@ -75,12 +85,21 @@ exports.loginUser = async (req, res) => {
         username: user.username,
         token: generateToken(user.id),
         profile: {
+            _id: user.id,
+            name: user.username,
             gold: user.gold,
             gems: user.gems,
             level: user.level,
             ownedCards: user.ownedCards,
             currentDeck: user.currentDeck,
-            trophies: user.trophies
+            trophies: user.trophies,
+            chests: user.chests,
+            friends: user.friends,
+            friendRequests: user.friendRequests,
+            clanId: user.clanId,
+            description: user.description,
+            bannerId: user.bannerId,
+            badges: user.badges
         }
       });
     } else {
@@ -109,4 +128,49 @@ exports.updateDeck = async (req, res) => {
     user.currentDeck = deck;
     await user.save();
     res.json({ success: true, currentDeck: user.currentDeck });
+};
+
+// New Controller Method
+exports.updateProfile = async (req, res) => {
+    const { name, description, bannerId, badges } = req.body;
+    const user = await User.findById(req.user.id);
+    
+    if (user) {
+        // Name check (simple uniqueness check simulation)
+        if (name && name !== user.username) {
+            const exists = await User.findOne({ username: name });
+            if (exists) return res.status(400).json({ message: "Name taken" });
+            user.username = name;
+        }
+        
+        user.description = description || user.description;
+        user.bannerId = bannerId || user.bannerId;
+        user.badges = badges || user.badges;
+        
+        await user.save();
+        
+        // Return full profile similar to login
+        res.json({ 
+            success: true, 
+            profile: {
+                _id: user.id,
+                name: user.username,
+                gold: user.gold,
+                gems: user.gems,
+                level: user.level,
+                ownedCards: user.ownedCards,
+                currentDeck: user.currentDeck,
+                trophies: user.trophies,
+                chests: user.chests,
+                friends: user.friends,
+                friendRequests: user.friendRequests,
+                clanId: user.clanId,
+                description: user.description,
+                bannerId: user.bannerId,
+                badges: user.badges
+            }
+        });
+    } else {
+        res.status(404).json({ message: 'User not found' });
+    }
 };
