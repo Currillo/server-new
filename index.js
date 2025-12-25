@@ -1147,19 +1147,33 @@ io.on('connection', (socket) => {
     const onMatchEnd = (winnerId, playersMap, isFriendly) => {
         if (isFriendly || !winnerId) return;
 
+        // WINNER LOGIC
         const winner = USERS[winnerId];
-        if (!winner) return;
+        if (winner) {
+            const goldWon = Math.floor(Math.random() * 15) + 15;
+            winner.gold += goldWon;
+            winner.trophies += 30; 
+            grantChest(winner);
+            logUserActivity(winner.id, 'MATCH_WIN', `Gold: ${goldWon}`);
 
-        const goldWon = Math.floor(Math.random() * 15) + 15;
-        winner.gold += goldWon;
-        winner.trophies = Math.max(0, winner.trophies + 30); 
+            const winnerSocket = io.sockets.sockets.get(winner.socketId);
+            if (winnerSocket) {
+                 winnerSocket.emit('profile_update', winner);
+            }
+        }
 
-        grantChest(winner);
-        logUserActivity(winner.id, 'MATCH_WIN', `Gold: ${goldWon}`);
+        // LOSER LOGIC
+        const loserId = Object.keys(playersMap).find(pid => pid !== winnerId);
+        const loser = USERS[loserId];
+        if (loser) {
+            const lostTrophies = 20;
+            loser.trophies = Math.max(0, loser.trophies - lostTrophies);
+            logUserActivity(loser.id, 'MATCH_LOSS', `-${lostTrophies} Trophies`);
 
-        const winnerSocket = io.sockets.sockets.get(winner.socketId);
-        if (winnerSocket) {
-             winnerSocket.emit('profile_update', winner);
+            const loserSocket = io.sockets.sockets.get(loser.socketId);
+            if (loserSocket) {
+                loserSocket.emit('profile_update', loser);
+            }
         }
     };
 
