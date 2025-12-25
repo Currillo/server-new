@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const fs = require('fs'); // Added for persistence
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 
@@ -11,10 +12,32 @@ const { handleMatchmaking, getRoomByUserId, cleanupUser } = require('./socket/ma
 const GameRoom = require('./socket/gameRoom'); // Import directly for friendly battles
 const { CARDS, UPGRADE_COSTS, CARDS_REQUIRED, CHEST_DATA } = require('./gameData');
 
-// --- In-Memory Database ---
+// --- In-Memory Database with Persistence ---
 const USERS = {}; // id -> UserProfile
 const CLANS = {}; // id -> Clan object
 const ROOMS = {}; // roomId -> GameRoom (Friendly battles stored here, matchmaking has its own)
+const DATA_FILE = './server_data.json';
+
+// Load Data
+if (fs.existsSync(DATA_FILE)) {
+    try {
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        if (data.users) Object.assign(USERS, data.users);
+        if (data.clans) Object.assign(CLANS, data.clans);
+        console.log(`[Persistence] Loaded ${Object.keys(USERS).length} users and ${Object.keys(CLANS).length} clans.`);
+    } catch (e) {
+        console.error("[Persistence] Error loading data:", e);
+    }
+}
+
+const saveData = () => {
+    try {
+        const data = { users: USERS, clans: CLANS };
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error("[Persistence] Error saving data:", e);
+    }
+};
 
 // Initialize
 const app = express();
@@ -57,13 +80,21 @@ const grantChest = (user) => {
     };
     user.chests.push(chest);
     logUserActivity(user.id, 'CHEST_EARNED', `Type: ${type}`);
+    saveData();
     return true;
 };
 
 // --- Mock API Routes ---
 
 app.post('/api/auth/register', (req, res) => {
-    const { username } = req.body;
+    const { username, password } = req.body;
+    
+    // Fix: Check for duplicate username
+    const exists = Object.values(USERS).find(u => u.username.toLowerCase() === username.toLowerCase());
+    if (exists) {
+        return res.status(400).json({ message: "Username already taken." });
+    }
+
     const id = uuidv4();
     
     // Default Starter Cards
@@ -78,8 +109,9 @@ app.post('/api/auth/register', (req, res) => {
     const newUser = {
         _id: id,
         id: id,
-        username: username || `Guest_${id.substr(0,4)}`,
-        name: username || `Guest_${id.substr(0,4)}`,
+        username: username,
+        password: password, // Fix: Store password
+        name: username,
         gold: 1000,
         gems: 100,
         level: 1,
@@ -101,19 +133,28 @@ app.post('/api/auth/register', (req, res) => {
     };
 
     USERS[id] = newUser;
+    saveData(); // Persist
     logUserActivity(id, 'REGISTER', 'Account Created');
+
+    // Return profile without password
+    const { password: _, ...safeProfile } = newUser;
 
     res.json({
         token: id, 
-        profile: newUser
+        profile: safeProfile
     });
 });
 
 app.post('/api/auth/login', (req, res) => {
-    const { username } = req.body;
-    const user = Object.values(USERS).find(u => u.username === username || u.name === username);
+    const { username, password } = req.body;
+    const user = Object.values(USERS).find(u => u.username.toLowerCase() === username.toLowerCase());
     
     if (user) {
+        // Fix: Verify password
+        if (user.password !== password) {
+            return res.status(401).json({ message: "Invalid password." });
+        }
+
         if (user.isBanned) {
             if (user.banExpires && Date.now() < user.banExpires) {
                 const remaining = Math.ceil((user.banExpires - Date.now()) / 60000);
@@ -124,11 +165,14 @@ app.post('/api/auth/login', (req, res) => {
             // Ban expired
             user.isBanned = false;
             user.banExpires = null;
+            saveData();
         }
         logUserActivity(user.id, 'LOGIN', 'User Logged In');
+        
+        const { password: _, ...safeProfile } = user;
         res.json({
             token: user.id,
-            profile: user
+            profile: safeProfile
         });
     } else {
         res.status(401).json({ message: "User not found. Please register." });
@@ -140,7 +184,8 @@ app.get('/api/auth/profile', (req, res) => {
     const user = USERS[token];
     if (user) {
         if (user.isBanned) return res.status(403).json({ message: "Account Banned" });
-        res.json(user);
+        const { password: _, ...safeProfile } = user;
+        res.json(safeProfile);
     } else {
         res.status(401).json({ message: "Invalid Token" });
     }
@@ -154,18 +199,20 @@ app.put('/api/auth/updateProfile', (req, res) => {
     if (user) {
         // Name Logic
         if (name && name !== user.name) {
-            const exists = Object.values(USERS).find(u => (u.username === name || u.name === name) && u.id !== user.id);
+            const exists = Object.values(USERS).find(u => (u.username.toLowerCase() === name.toLowerCase() || u.name.toLowerCase() === name.toLowerCase()) && u.id !== user.id);
             if (exists) return res.status(400).json({ message: "Name already taken" });
             user.name = name;
-            user.username = name;
+            user.username = name; // Sync username with display name for simplicity
         }
         
         if (description !== undefined) user.description = description;
         if (bannerId !== undefined) user.bannerId = bannerId;
         if (badges !== undefined) user.badges = badges;
 
+        saveData();
         logUserActivity(user.id, 'UPDATE_PROFILE', 'Edited Profile');
-        res.json({ success: true, profile: user });
+        const { password: _, ...safeProfile } = user;
+        res.json({ success: true, profile: safeProfile });
     } else {
         res.status(401).json({ message: "Invalid Token" });
     }
@@ -178,6 +225,7 @@ app.put('/api/auth/deck', (req, res) => {
 
     if (user && deck && deck.length === 8) {
         user.currentDeck = deck;
+        saveData();
         logUserActivity(user.id, 'DECK_UPDATE', 'Deck Modified');
         res.json({ success: true, currentDeck: deck });
     } else {
@@ -214,8 +262,10 @@ app.post('/api/player/upgrade', (req, res) => {
         logUserActivity(user.id, 'LEVEL_UP', `Reached Level ${user.level}`);
     }
 
+    saveData();
     logUserActivity(user.id, 'UPGRADE', `Upgraded ${cardId} to Lv.${card.level}`);
-    res.json({ success: true, profile: user });
+    const { password: _, ...safeProfile } = user;
+    res.json({ success: true, profile: safeProfile });
 });
 
 // Chest Logic: Start Unlock
@@ -241,8 +291,10 @@ app.post('/api/player/chest/unlock', (req, res) => {
     chest.status = 'UNLOCKING';
     chest.unlockFinishTime = Date.now() + duration;
     
+    saveData();
     logUserActivity(user.id, 'CHEST_UNLOCK', `Started unlock for ${chest.type}`);
-    res.json({ success: true, profile: user });
+    const { password: _, ...safeProfile } = user;
+    res.json({ success: true, profile: safeProfile });
 });
 
 // Chest Logic: Open
@@ -293,8 +345,10 @@ app.post('/api/player/chest/open', (req, res) => {
     // Remove chest
     user.chests.splice(idx, 1);
     
+    saveData();
     logUserActivity(user.id, 'CHEST_OPEN', `Opened ${chest.type}, Gold: ${gold}`);
-    res.json({ success: true, profile: user, rewards });
+    const { password: _, ...safeProfile } = user;
+    res.json({ success: true, profile: safeProfile, rewards });
 });
 
 
@@ -323,10 +377,38 @@ io.on('connection', (socket) => {
     console.log(`✅ Conectado: ${socket.user.username} (${socket.id})`);
     
     // Update live socket mapping
-    USERS[socket.user.id].socketId = socket.id;
+    if (USERS[socket.user.id]) {
+        USERS[socket.user.id].socketId = socket.id;
+    }
 
     // Notify friends that user is online
     notifyFriendsStatus(socket.user.id, true);
+
+    // --- PLAYER ABANDONMENT HANDLING ---
+    socket.on('leave_match', () => {
+        const userId = socket.user.id;
+        console.log(`[Match] Player ${socket.user.username} explicitly left the match.`);
+        
+        // Find if user is in a matchmaking room
+        let room = getRoomByUserId(userId);
+        
+        if (!room) {
+             // Check friendly rooms
+             room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(userId));
+        }
+
+        if (room && !room.gameState.gameOver) {
+            const winnerId = Object.keys(room.players).find(pid => pid !== userId);
+            // End the game, triggering win for opponent and loss for leaver
+            room.endGame(winnerId, 'OPPONENT_LEFT');
+            
+            // Clean up later to allow UI to show result
+            setTimeout(() => {
+                if (rooms[room.roomId]) delete rooms[room.roomId]; // For matchmaker
+                if (ROOMS[room.roomId]) delete ROOMS[room.roomId]; // For friendly
+            }, 5000);
+        }
+    });
 
     // --- FULL ADMIN PANEL LOGIC ---
     // Fix: Default payload to empty object if undefined to prevent crashes accessing payload.userId
@@ -354,6 +436,7 @@ io.on('connection', (socket) => {
         switch(action) {
             case 'CLAIM_ADMIN':
                 USERS[adminId].isAdmin = true;
+                saveData();
                 socket.emit('profile_update', USERS[adminId]);
                 socket.emit('admin_data', { type: 'LOG', payload: `Admin status claimed by ${socket.user.username}` });
                 break;
@@ -384,9 +467,10 @@ io.on('connection', (socket) => {
                     if (room) {
                         liveStats = room.getLiveStats(targetUser.id);
                     }
+                    const { password: _, ...safeProfile } = targetUser;
                     socket.emit('admin_data', { 
                         type: 'PLAYER_DETAILS', 
-                        payload: { ...targetUser, liveStats } 
+                        payload: { ...safeProfile, liveStats } 
                     });
                 }
                 break;
@@ -396,6 +480,7 @@ io.on('connection', (socket) => {
                     targetUser.isBanned = true;
                     // Duration in minutes, defaults to permanent (null)
                     targetUser.banExpires = payload.duration ? Date.now() + (payload.duration * 60000) : null;
+                    saveData();
                     
                     logUserActivity(targetUser.id, 'BANNED', `By Admin ${socket.user.username} for ${payload.duration || 'forever'}m`);
 
@@ -438,6 +523,7 @@ io.on('connection', (socket) => {
                     cleanupUser(tId, targetUser.socketId);
                     // Remove
                     delete USERS[tId];
+                    saveData();
                     socket.emit('admin_data', { type: 'LOG', payload: `Deleted user ${targetUser.username}` });
                     // Refresh list
                     socket.emit('admin_action', { action: 'GET_STATS' });
@@ -457,11 +543,13 @@ io.on('connection', (socket) => {
                     starterCardIds.forEach(id => targetUser.ownedCards[id] = { level: 1, count: 0 });
                     targetUser.currentDeck = [...starterCardIds];
                     
+                    saveData();
                     logUserActivity(targetUser.id, 'RESET', `By Admin ${socket.user.username}`);
 
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Reset user ${targetUser.username}` });
                 }
@@ -471,10 +559,12 @@ io.on('connection', (socket) => {
                 if (targetUser) {
                     targetUser.gold = (targetUser.gold || 0) + (payload.gold || 0);
                     targetUser.gems = (targetUser.gems || 0) + (payload.gems || 0);
+                    saveData();
                     logUserActivity(targetUser.id, 'GIFT', `Gold: ${payload.gold}, Gems: ${payload.gems}`);
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Gave resources to ${targetUser.username}` });
                 }
@@ -484,9 +574,11 @@ io.on('connection', (socket) => {
                 if (targetUser) {
                     if (payload.gold !== undefined) targetUser.gold = payload.gold;
                     if (payload.gems !== undefined) targetUser.gems = payload.gems;
+                    saveData();
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Set resources for ${targetUser.username}` });
                 }
@@ -500,10 +592,12 @@ io.on('connection', (socket) => {
                         targetUser.ownedCards[cardId] = { level: 1, count: 0 };
                     }
                     targetUser.ownedCards[cardId].count += count;
+                    saveData();
                     logUserActivity(targetUser.id, 'GIFT_CARD', `${count}x ${cardId}`);
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Gave ${count} x ${cardId} to ${targetUser.username}` });
                 }
@@ -515,10 +609,12 @@ io.on('connection', (socket) => {
                     const count = payload.count;
                     if (targetUser.ownedCards[cardId]) {
                         targetUser.ownedCards[cardId].count = Math.max(0, targetUser.ownedCards[cardId].count - count);
+                        saveData();
                         logUserActivity(targetUser.id, 'REMOVE_CARD', `Removed ${count}x ${cardId}`);
                         if (targetUser.socketId) {
                             const ts = io.sockets.sockets.get(targetUser.socketId);
-                            if (ts) ts.emit('profile_update', targetUser);
+                            const { password: _, ...safeProfile } = targetUser;
+                            if (ts) ts.emit('profile_update', safeProfile);
                         }
                         socket.emit('admin_data', { type: 'LOG', payload: `Removed ${count} x ${cardId} from ${targetUser.username}` });
                     }
@@ -547,18 +643,22 @@ io.on('connection', (socket) => {
                         }
                         receiverUser.ownedCards[cardId].count += count;
                         
+                        saveData();
+                        
                         logUserActivity(targetUser.id, 'TRANSFER_SENT', `${count}x ${cardId} to ${receiverUser.username}`);
                         logUserActivity(receiverUser.id, 'TRANSFER_RECV', `${count}x ${cardId} from ${targetUser.username}`);
                         
                         // Update Sender
                         if (targetUser.socketId) {
                             const ts = io.sockets.sockets.get(targetUser.socketId);
-                            if (ts) ts.emit('profile_update', targetUser);
+                            const { password: _, ...safeProfile } = targetUser;
+                            if (ts) ts.emit('profile_update', safeProfile);
                         }
                         // Update Receiver
                         if (receiverUser.socketId) {
                             const rs = io.sockets.sockets.get(receiverUser.socketId);
-                            if (rs) rs.emit('profile_update', receiverUser);
+                            const { password: _, ...safeProfile } = receiverUser;
+                            if (rs) rs.emit('profile_update', safeProfile);
                         }
                         
                         socket.emit('admin_data', { type: 'LOG', payload: `Transferred ${count} ${cardId} from ${targetUser.username} to ${receiverUser.username}` });
@@ -583,10 +683,12 @@ io.on('connection', (socket) => {
                         }
                     });
                     targetUser.level = 14;
+                    saveData();
                     logUserActivity(targetUser.id, 'UNLOCK_ALL', 'Maxed out collection');
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Unlocked cards for ${targetUser.username}` });
                 }
@@ -598,10 +700,12 @@ io.on('connection', (socket) => {
                     Object.keys(targetUser.ownedCards).forEach(cardId => {
                         targetUser.ownedCards[cardId].level = lvl;
                     });
+                    saveData();
                     logUserActivity(targetUser.id, 'SET_LEVELS', `All cards set to Lv.${lvl}`);
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Set all cards to Lv.${lvl} for ${targetUser.username}` });
                 }
@@ -612,10 +716,12 @@ io.on('connection', (socket) => {
                     const sourceUser = USERS[payload.sourceId];
                     if (sourceUser) {
                         targetUser.currentDeck = [...sourceUser.currentDeck];
+                        saveData();
                         logUserActivity(targetUser.id, 'CLONE_DECK', `From ${sourceUser.username}`);
                         if (targetUser.socketId) {
                             const ts = io.sockets.sockets.get(targetUser.socketId);
-                            if (ts) ts.emit('profile_update', targetUser);
+                            const { password: _, ...safeProfile } = targetUser;
+                            if (ts) ts.emit('profile_update', safeProfile);
                         }
                         socket.emit('admin_data', { type: 'LOG', payload: `Cloned deck from ${sourceUser.username} to ${targetUser.username}` });
                     }
@@ -625,10 +731,12 @@ io.on('connection', (socket) => {
             case 'TOGGLE_TEMP_ADMIN':
                 if (targetUser) {
                     targetUser.isAdmin = !targetUser.isAdmin;
+                    saveData();
                     logUserActivity(targetUser.id, 'ADMIN_TOGGLE', `Status: ${targetUser.isAdmin}`);
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Toggled admin for ${targetUser.username}` });
                 }
@@ -637,7 +745,8 @@ io.on('connection', (socket) => {
             case 'FORCE_UPDATE_INVENTORY':
                 if (targetUser && targetUser.socketId) {
                     const ts = io.sockets.sockets.get(targetUser.socketId);
-                    if (ts) ts.emit('profile_update', targetUser);
+                    const { password: _, ...safeProfile } = targetUser;
+                    if (ts) ts.emit('profile_update', safeProfile);
                     socket.emit('admin_data', { type: 'LOG', payload: `Forced update for ${targetUser.username}` });
                 }
                 break;
@@ -651,10 +760,12 @@ io.on('connection', (socket) => {
                             status: 'LOCKED',
                             unlockFinishTime: null
                         });
+                        saveData();
                         logUserActivity(targetUser.id, 'GIFT_CHEST', `${payload.type}`);
                         if (targetUser.socketId) {
                             const ts = io.sockets.sockets.get(targetUser.socketId);
-                            if (ts) ts.emit('profile_update', targetUser);
+                            const { password: _, ...safeProfile } = targetUser;
+                            if (ts) ts.emit('profile_update', safeProfile);
                         }
                         socket.emit('admin_data', { type: 'LOG', payload: `Gave chest to ${targetUser.username}` });
                     }
@@ -669,9 +780,11 @@ io.on('connection', (socket) => {
                             c.unlockFinishTime = Date.now(); // Ready now
                         }
                     });
+                    saveData();
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Instant opened chests for ${targetUser.username}` });
                 }
@@ -683,9 +796,11 @@ io.on('connection', (socket) => {
                     if (chest) {
                         chest.status = 'READY';
                         chest.unlockFinishTime = Date.now();
+                        saveData();
                         if (targetUser.socketId) {
                             const ts = io.sockets.sockets.get(targetUser.socketId);
-                            if (ts) ts.emit('profile_update', targetUser);
+                            const { password: _, ...safeProfile } = targetUser;
+                            if (ts) ts.emit('profile_update', safeProfile);
                         }
                         socket.emit('admin_data', { type: 'LOG', payload: `Forced chest READY for ${targetUser.username}` });
                     }
@@ -702,9 +817,11 @@ io.on('connection', (socket) => {
                             count++;
                         }
                     });
+                    saveData();
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
-                        if (ts) ts.emit('profile_update', targetUser);
+                        const { password: _, ...safeProfile } = targetUser;
+                        if (ts) ts.emit('profile_update', safeProfile);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Reset ${count} chest timers for ${targetUser.username}` });
                 }
@@ -843,6 +960,7 @@ io.on('connection', (socket) => {
             fromId: socket.user.id,
             fromName: socket.user.name
         });
+        saveData();
 
         if (target.socketId) {
             const targetSocket = io.sockets.sockets.get(target.socketId);
@@ -851,7 +969,8 @@ io.on('connection', (socket) => {
                     fromId: socket.user.id, 
                     fromName: socket.user.name 
                 });
-                targetSocket.emit('profile_update', target);
+                const { password: _, ...safeProfile } = target;
+                targetSocket.emit('profile_update', safeProfile);
             }
         }
         socket.emit('success', `Request sent to ${target.name}`);
@@ -866,26 +985,32 @@ io.on('connection', (socket) => {
         if (requester) {
             if (!user.friends.includes(requesterId)) user.friends.push(requesterId);
             if (!requester.friends.includes(user.id)) requester.friends.push(user.id);
+            saveData();
 
-            socket.emit('profile_update', user);
+            const { password: p1, ...safeUser } = user;
+            socket.emit('profile_update', safeUser);
             socket.emit('friend_added', { id: requester.id, name: requester.name, isOnline: !!requester.socketId });
 
             if (requester.socketId) {
                 const reqSocket = io.sockets.sockets.get(requester.socketId);
                 if (reqSocket) {
-                    reqSocket.emit('profile_update', requester);
+                    const { password: p2, ...safeRequester } = requester;
+                    reqSocket.emit('profile_update', safeRequester);
                     reqSocket.emit('friend_added', { id: user.id, name: user.name, isOnline: true });
                 }
             }
         } else {
-             socket.emit('profile_update', user); 
+             const { password: _, ...safeUser } = user;
+             socket.emit('profile_update', safeUser); 
         }
     });
 
     socket.on('decline_friend_request', ({ requesterId }) => {
         const user = USERS[socket.user.id];
         user.friendRequests = user.friendRequests.filter(r => r.fromId !== requesterId);
-        socket.emit('profile_update', user);
+        saveData();
+        const { password: _, ...safeUser } = user;
+        socket.emit('profile_update', safeUser);
     });
 
     socket.on('get_friends_status', () => {
@@ -903,7 +1028,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('refresh_profile', () => {
-        socket.emit('profile_update', USERS[socket.user.id]);
+        const { password: _, ...safeProfile } = USERS[socket.user.id];
+        socket.emit('profile_update', safeProfile);
     });
 
     // --- Friendly Battle Logic ---
@@ -1023,6 +1149,7 @@ io.on('connection', (socket) => {
         CLANS[clanId] = newClan;
         socket.user.clanId = clanId;
         if (USERS[socket.user.id]) USERS[socket.user.id].clanId = clanId;
+        saveData();
 
         socket.join(clanId);
         socket.emit('clan_joined', newClan);
@@ -1048,6 +1175,7 @@ io.on('connection', (socket) => {
         clan.members.push(socket.user.id);
         socket.user.clanId = clanId;
         if (USERS[socket.user.id]) USERS[socket.user.id].clanId = clanId;
+        saveData();
 
         socket.join(clanId);
         socket.emit('clan_joined', clan);
@@ -1082,6 +1210,7 @@ io.on('connection', (socket) => {
         
         socket.user.clanId = null;
         if (USERS[socket.user.id]) USERS[socket.user.id].clanId = null;
+        saveData();
         
         socket.leave(clanId);
         socket.emit('clan_left');
@@ -1126,6 +1255,7 @@ io.on('connection', (socket) => {
 
         CLANS[clanId].messages.push(msg);
         if (CLANS[clanId].messages.length > 50) CLANS[clanId].messages.shift();
+        saveData();
 
         io.to(clanId).emit('clan_message', msg);
     });
@@ -1139,6 +1269,7 @@ io.on('connection', (socket) => {
             if (!msg.reactions) msg.reactions = {};
             if (!msg.reactions[emoji]) msg.reactions[emoji] = 0;
             msg.reactions[emoji]++;
+            saveData();
             io.to(clanId).emit('clan_reaction_update', { messageId, reactions: msg.reactions });
         }
     });
@@ -1155,10 +1286,12 @@ io.on('connection', (socket) => {
             winner.trophies += 30; 
             grantChest(winner);
             logUserActivity(winner.id, 'MATCH_WIN', `Gold: ${goldWon}`);
+            saveData();
 
             const winnerSocket = io.sockets.sockets.get(winner.socketId);
             if (winnerSocket) {
-                 winnerSocket.emit('profile_update', winner);
+                 const { password: _, ...safeProfile } = winner;
+                 winnerSocket.emit('profile_update', safeProfile);
             }
         }
 
@@ -1169,10 +1302,12 @@ io.on('connection', (socket) => {
             const lostTrophies = 20;
             loser.trophies = Math.max(0, loser.trophies - lostTrophies);
             logUserActivity(loser.id, 'MATCH_LOSS', `-${lostTrophies} Trophies`);
+            saveData();
 
             const loserSocket = io.sockets.sockets.get(loser.socketId);
             if (loserSocket) {
-                loserSocket.emit('profile_update', loser);
+                const { password: _, ...safeProfile } = loser;
+                loserSocket.emit('profile_update', safeProfile);
             }
         }
     };
@@ -1230,5 +1365,5 @@ function notifyFriendsStatus(userId, isOnline) {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    console.log(`Mode: In-Memory (No Database)`);
+    console.log(`Mode: In-Memory with Persistence (server_data.json)`);
 });
