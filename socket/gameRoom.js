@@ -153,11 +153,14 @@ class GameRoom {
     const yPrincess = side === 'BOTTOM' ? 6.5 : ARENA_HEIGHT - 6.5;
     const yKing = side === 'BOTTOM' ? 2.5 : ARENA_HEIGHT - 2.5;
 
-    this.gameState.entities.push(
-      this.createEntity('tower_princess', playerId, { x: 3.5, y: yPrincess }),
-      this.createEntity('tower_princess', playerId, { x: ARENA_WIDTH - 3.5, y: yPrincess }),
-      this.createEntity('tower_king', playerId, { x: ARENA_WIDTH / 2, y: yKing })
-    );
+    // Safety: ensure createEntity returns a valid object before pushing
+    const t1 = this.createEntity('tower_princess', playerId, { x: 3.5, y: yPrincess });
+    const t2 = this.createEntity('tower_princess', playerId, { x: ARENA_WIDTH - 3.5, y: yPrincess });
+    const t3 = this.createEntity('tower_king', playerId, { x: ARENA_WIDTH / 2, y: yKing });
+
+    if (t1) this.gameState.entities.push(t1);
+    if (t2) this.gameState.entities.push(t2);
+    if (t3) this.gameState.entities.push(t3);
   }
 
   createEntity(defId, ownerId, pos) {
@@ -253,6 +256,13 @@ class GameRoom {
         for (let i = this.gameState.entities.length - 1; i >= 0; i--) {
             const ent = this.gameState.entities[i];
             
+            // Safety Check: If entity is null/undefined, remove it and continue
+            if (!ent) {
+                this.gameState.entities.splice(i, 1);
+                continue;
+            }
+
+            // Safety Check: If Def is missing
             if (!CARDS[ent.defId]) {
                 this.gameState.entities.splice(i, 1);
                 continue;
