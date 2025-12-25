@@ -1,8 +1,22 @@
+
 // Shared constants between client and server logic
 // In a full production app, this would be a shared monorepo package
 
 const ARENA_WIDTH = 18;
 const ARENA_HEIGHT = 32;
+
+// --- UPGRADE SYSTEM (Synced) ---
+const MAX_LEVEL = 16;
+
+// Cards required to reach next level (index 0 = level 1->2)
+const CARDS_REQUIRED = [
+    0, 2, 4, 10, 20, 50, 100, 200, 400, 800, 1000, 1500, 2000, 3000, 5000, 0
+];
+
+// Gold cost to reach next level
+const UPGRADE_COSTS = [
+    0, 5, 20, 50, 150, 400, 1000, 2000, 4000, 8000, 15000, 35000, 75000, 100000, 0, 0
+];
 
 const BASE_STATS = {
   hp: 100, damage: 10, hitSpeed: 1, range: 1, speed: 2, 
@@ -31,4 +45,4 @@ const CARDS = {
   'tower_king': { cost: 0, type: 'BUILDING', stats: { ...BASE_STATS, hp: 4000, damage: 120, hitSpeed: 1, range: 7, speed: 0, radius: 2 } }
 };
 
-module.exports = { CARDS, ARENA_WIDTH, ARENA_HEIGHT };
+module.exports = { CARDS, ARENA_WIDTH, ARENA_HEIGHT, UPGRADE_COSTS, CARDS_REQUIRED };
