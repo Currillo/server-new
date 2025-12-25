@@ -295,6 +295,7 @@ class GameRoom {
                     if (ent.defId === 'tower_king') {
                         const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
                         this.endGame(winnerId, 'TOWER_DESTROYED');
+                        return; // CRITICAL FIX: Stop update loop immediately if game over
                     }
                 }
             }
@@ -595,8 +596,8 @@ class GameRoom {
               
               // Calc Progress
               if (p.startPos) {
-                  const totalDist = Math.sqrt((p.startPos.x - p.targetPos.x)**2 + (p.startPos.y - p.targetPos.y)**2) || 1;
-                  const distTraveled = Math.sqrt((p.startPos.x - p.position.x)**2 + (p.startPos.y - p.position.y)**2);
+                  const totalDist = Math.sqrt(distSq(p.startPos, p.targetPos)) || 1;
+                  const distTraveled = Math.sqrt(distSq(p.startPos, p.position));
                   p.progress = Math.min(1, Math.max(0, distTraveled / totalDist));
               }
           }
@@ -776,7 +777,11 @@ class GameRoom {
       
       // Execute Server Callback for Economy (Gold/Chests)
       if (this.onMatchEnd) {
-          this.onMatchEnd(winnerId, this.players, this.isFriendly);
+          try {
+              this.onMatchEnd(winnerId, this.players, this.isFriendly);
+          } catch (e) {
+              console.error(`[GameRoom] Error in onMatchEnd callback: ${e.message}`);
+          }
       }
       
       this.io.to(this.roomId).emit('game_over', { 
