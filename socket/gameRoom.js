@@ -31,6 +31,9 @@ class GameRoom {
     this.aiAssistance = {}; // userId -> boolean
     this.aiTimer = 0; // throttle AI moves
 
+    // Match Logging
+    this.matchLog = [];
+
     // P1 is "Bottom" (y=0..16 visually for them), P2 is "Top"
     // Server coordinates are absolute 0..32.
     // P1 Base at y=0, P2 Base at y=32.
@@ -51,25 +54,36 @@ class GameRoom {
     this.lastTime = Date.now();
   }
 
+  logAction(action, detail) {
+      const entry = `[${Math.floor(180 - this.gameState.time)}s] ${action}: ${detail}`;
+      this.matchLog.push(entry);
+      // console.log(`[Room ${this.roomId}] ${entry}`);
+  }
+
   // --- Admin Methods ---
   setGodMode(userId, enabled) {
       this.godModes[userId] = enabled;
+      this.logAction('ADMIN', `God Mode ${enabled} for ${userId}`);
   }
 
   setInvincibility(userId, enabled) {
       this.invincibility[userId] = enabled;
+      this.logAction('ADMIN', `Invincibility ${enabled} for ${userId}`);
   }
 
   setFrozen(userId, enabled) {
       this.frozenPlayers[userId] = enabled;
+      this.logAction('ADMIN', `Freeze ${enabled} for ${userId}`);
   }
 
   setElixirMultiplier(userId, mult) {
       this.elixirMultipliers[userId] = mult;
+      this.logAction('ADMIN', `Elixir Mult ${mult}x for ${userId}`);
   }
 
   setAI(userId, enabled) {
       this.aiAssistance[userId] = enabled;
+      this.logAction('ADMIN', `AI ${enabled} for ${userId}`);
   }
 
   destroyTowers(ownerId) {
@@ -78,6 +92,7 @@ class GameRoom {
               e.hp = 0;
           }
       });
+      this.logAction('ADMIN', `Nuked towers for ${ownerId}`);
   }
 
   // NEW: Get lightweight stats for admin inspector
@@ -99,7 +114,10 @@ class GameRoom {
           towerHp: Math.floor(towerHp),
           unitCount,
           isFrozen: !!this.frozenPlayers[userId],
-          elixirMult: this.elixirMultipliers[userId] || 1
+          isGodMode: !!this.godModes[userId],
+          isInvincible: !!this.invincibility[userId],
+          elixirMult: this.elixirMultipliers[userId] || 1,
+          timeRemaining: Math.floor(this.gameState.time)
       };
   }
 
@@ -172,94 +190,98 @@ class GameRoom {
       return;
     }
 
-    const now = Date.now();
-    const dt = (now - this.lastTime) / 1000; // Delta time in seconds
-    this.lastTime = now;
+    try {
+        const now = Date.now();
+        const dt = (now - this.lastTime) / 1000; // Delta time in seconds
+        this.lastTime = now;
 
-    // 1. Time & Elixir
-    this.gameState.time -= dt;
-    if (this.gameState.time <= 0) {
-        this.endGame('DRAW');
-        return;
-    }
-
-    Object.keys(this.players).forEach(pid => {
-      const rate = this.gameState.time <= 60 ? ELIXIR_RATE / 2 : ELIXIR_RATE;
-      
-      // Admin Elixir Multiplier
-      const multiplier = this.elixirMultipliers[pid] || 1.0;
-
-      // God Mode Override
-      if (this.godModes[pid]) {
-          this.gameState.elixir[pid] = MAX_ELIXIR;
-      } else {
-          // Normal Gain * Multiplier
-          this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, this.gameState.elixir[pid] + (dt / rate) * multiplier);
-      }
-
-      // Check AI Assistance
-      if (this.aiAssistance[pid]) {
-          this.runAI(pid, dt);
-      }
-    });
-
-    // 2. Projectiles
-    this.updateProjectiles(dt);
-
-    // 3. Entities
-    for (let i = this.gameState.entities.length - 1; i >= 0; i--) {
-        const ent = this.gameState.entities[i];
-        
-        if (!CARDS[ent.defId]) {
-            this.gameState.entities.splice(i, 1);
-            continue;
+        // 1. Time & Elixir
+        this.gameState.time -= dt;
+        if (this.gameState.time <= 0) {
+            this.endGame('DRAW');
+            return;
         }
 
-        // Freeze Logic: If owner is frozen, skip update (except deployment timer for simplicity)
-        if (this.frozenPlayers[ent.ownerId]) {
-            continue;
-        }
+        Object.keys(this.players).forEach(pid => {
+          const rate = this.gameState.time <= 60 ? ELIXIR_RATE / 2 : ELIXIR_RATE;
+          
+          // Admin Elixir Multiplier
+          const multiplier = this.elixirMultipliers[pid] || 1.0;
 
-        // Handle Dying State (Visual feedback buffer)
-        if (ent.state === 'DYING') {
-            ent.deathTimer = (ent.deathTimer || 1) - dt;
-            if (ent.deathTimer <= 0) {
+          // God Mode Override - Force Max Elixir every tick
+          if (this.godModes[pid]) {
+              this.gameState.elixir[pid] = MAX_ELIXIR;
+          } else {
+              // Normal Gain * Multiplier
+              this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, this.gameState.elixir[pid] + (dt / rate) * multiplier);
+          }
+
+          // Check AI Assistance
+          if (this.aiAssistance[pid]) {
+              this.runAI(pid, dt);
+          }
+        });
+
+        // 2. Projectiles
+        this.updateProjectiles(dt);
+
+        // 3. Entities
+        for (let i = this.gameState.entities.length - 1; i >= 0; i--) {
+            const ent = this.gameState.entities[i];
+            
+            if (!CARDS[ent.defId]) {
                 this.gameState.entities.splice(i, 1);
+                continue;
             }
-            continue; 
-        }
-        
-        // Handle Stun
-        if (ent.stunTimer > 0) {
-            ent.stunTimer -= dt;
-            continue;
-        }
 
-        this.updateEntity(ent, dt);
-        
-        if (ent.hp <= 0) {
-            // Invincibility Override
-            if (this.invincibility[ent.ownerId]) {
-                ent.hp = ent.maxHp; // Heal instantly
-            } else {
-                ent.state = 'DYING';
-                ent.deathTimer = 1.0; 
-                
-                if (ent.defId === 'tower_king') {
-                    const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
-                    this.endGame(winnerId);
+            // Freeze Logic: If owner is frozen, skip update (except deployment timer for simplicity)
+            if (this.frozenPlayers[ent.ownerId]) {
+                continue;
+            }
+
+            // Handle Dying State (Visual feedback buffer)
+            if (ent.state === 'DYING') {
+                ent.deathTimer = (ent.deathTimer || 1) - dt;
+                if (ent.deathTimer <= 0) {
+                    this.gameState.entities.splice(i, 1);
+                }
+                continue; 
+            }
+            
+            // Handle Stun
+            if (ent.stunTimer > 0) {
+                ent.stunTimer -= dt;
+                continue;
+            }
+
+            this.updateEntity(ent, dt);
+            
+            if (ent.hp <= 0) {
+                // Invincibility Override
+                if (this.invincibility[ent.ownerId]) {
+                    ent.hp = ent.maxHp; // Heal instantly
+                } else {
+                    ent.state = 'DYING';
+                    ent.deathTimer = 1.0; 
+                    
+                    if (ent.defId === 'tower_king') {
+                        const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
+                        this.endGame(winnerId);
+                    }
                 }
             }
         }
-    }
 
-    // 4. Broadcast
-    this.io.to(this.roomId).emit('game_update', {
-        time: this.gameState.time,
-        elixir: this.gameState.elixir,
-        entities: this.gameState.entities,
-        projectiles: this.gameState.projectiles
-    });
+        // 4. Broadcast
+        this.io.to(this.roomId).emit('game_update', {
+            time: this.gameState.time,
+            elixir: this.gameState.elixir,
+            entities: this.gameState.entities,
+            projectiles: this.gameState.projectiles
+        });
+    } catch (e) {
+        console.error(`[GameRoom] Error in update loop: ${e.message}`);
+    }
   }
 
   runAI(playerId, dt) {
@@ -514,10 +536,14 @@ class GameRoom {
           return;
       }
       
-      // Allow slight floating point tolerance for Elixir
-      if (!bypassCost && this.gameState.elixir[playerId] < card.cost - 0.1) {
-          console.log(`[GameRoom] handleInput failed: Not enough elixir ${playerId} needs ${card.cost} has ${this.gameState.elixir[playerId]}`);
-          return;
+      const isGodMode = this.godModes[playerId];
+
+      // Cost Check
+      if (!bypassCost && !isGodMode) {
+          if (this.gameState.elixir[playerId] < card.cost - 0.1) {
+              // Not enough elixir
+              return;
+          }
       }
 
       // Validate Side (skip validation if admin spawn or spell)
@@ -538,9 +564,11 @@ class GameRoom {
           }
       }
 
-      if (!bypassCost && !this.godModes[playerId]) {
+      if (!bypassCost && !isGodMode) {
           this.gameState.elixir[playerId] -= card.cost;
       }
+
+      this.logAction('SPAWN', `${cardId} by ${playerId} at ${Math.floor(x)},${Math.floor(y)}`);
 
       // SPecial LOG Logic
       if (card.stats.projectileType === 'LOG') {
@@ -584,7 +612,7 @@ class GameRoom {
           offsets.forEach(off => {
               const ent = this.createEntity(cardId, playerId, { x: x + off.x, y: y + off.y });
               
-              if (bypassCost) {
+              if (bypassCost || isGodMode) {
                   ent.deployTimer = 0; // Instant deploy for admin spawns
                   ent.state = 'IDLE';
               }
