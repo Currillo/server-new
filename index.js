@@ -267,9 +267,23 @@ io.on('connection', (socket) => {
     notifyFriendsStatus(socket.user.id, true);
 
     // --- FULL ADMIN PANEL LOGIC ---
-    socket.on('admin_action', ({ action, payload }) => {
+    // Fix: Default payload to empty object if undefined to prevent crashes accessing payload.userId
+    socket.on('admin_action', ({ action, payload = {} }) => {
         const adminId = socket.user.id;
-        const targetUser = payload.userId ? USERS[payload.userId] : USERS[adminId];
+        
+        // Log the command
+        console.log(`[Admin] Action: ${action} from ${socket.user.username}`);
+
+        // Safely determine target user
+        let targetUser = USERS[adminId]; // Default to self
+        if (payload.userId) {
+            targetUser = USERS[payload.userId];
+            if (!targetUser) {
+                console.log(`[Admin] Target User Not Found: ${payload.userId}`);
+                // Proceeding might be safe if action handles undefined target, but usually we want to know.
+                // We'll let the individual cases handle 'if (!targetUser)' checks.
+            }
+        }
         
         let room = getRoomByUserId(adminId);
         if (!room) room = Object.values(ROOMS).find(r => Object.keys(r.players).includes(adminId));
@@ -301,6 +315,8 @@ io.on('connection', (socket) => {
                         if (targetSocket) targetSocket.disconnect(true);
                     }
                     socket.emit('admin_data', { type: 'LOG', payload: `Banned user ${targetUser.username}` });
+                } else {
+                    socket.emit('admin_data', { type: 'LOG', payload: `Error: User not found for BAN` });
                 }
                 break;
 
@@ -309,6 +325,8 @@ io.on('connection', (socket) => {
                     const targetSocket = io.sockets.sockets.get(targetUser.socketId);
                     if (targetSocket) targetSocket.disconnect(true);
                     socket.emit('admin_data', { type: 'LOG', payload: `Kicked user ${targetUser.username}` });
+                } else {
+                    socket.emit('admin_data', { type: 'LOG', payload: `Error: User not online or found for KICK` });
                 }
                 break;
 
@@ -342,6 +360,7 @@ io.on('connection', (socket) => {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
                         if (ts) ts.emit('profile_update', targetUser);
                     }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Gave resources to ${targetUser.username}` });
                 }
                 break;
 
@@ -357,6 +376,7 @@ io.on('connection', (socket) => {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
                         if (ts) ts.emit('profile_update', targetUser);
                     }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Unlocked cards for ${targetUser.username}` });
                 }
                 break;
 
@@ -373,20 +393,28 @@ io.on('connection', (socket) => {
                             const ts = io.sockets.sockets.get(targetUser.socketId);
                             if (ts) ts.emit('profile_update', targetUser);
                         }
+                        socket.emit('admin_data', { type: 'LOG', payload: `Gave chest to ${targetUser.username}` });
+                    } else {
+                        socket.emit('admin_data', { type: 'LOG', payload: `Slots full for ${targetUser.username}` });
                     }
                 }
                 break;
 
             case 'INSTANT_OPEN_CHESTS':
                 if (targetUser) {
+                    let opened = 0;
                     targetUser.chests.forEach(c => {
-                        c.status = 'UNLOCKING';
-                        c.unlockFinishTime = Date.now(); // Ready now
+                        if (c.status !== 'READY') {
+                            c.status = 'UNLOCKING';
+                            c.unlockFinishTime = Date.now(); // Ready now
+                            opened++;
+                        }
                     });
                     if (targetUser.socketId) {
                         const ts = io.sockets.sockets.get(targetUser.socketId);
                         if (ts) ts.emit('profile_update', targetUser);
                     }
+                    socket.emit('admin_data', { type: 'LOG', payload: `Instant opened ${opened} chests for ${targetUser.username}` });
                 }
                 break;
 
@@ -394,23 +422,31 @@ io.on('connection', (socket) => {
                 // Affects current room logic
                 if (room) {
                     room.setGodMode(adminId, payload.enabled);
+                    socket.emit('admin_data', { type: 'LOG', payload: `God Mode ${payload.enabled ? 'ON' : 'OFF'} for match` });
+                } else {
+                    socket.emit('admin_data', { type: 'LOG', payload: `No active match for God Mode` });
                 }
                 break;
             
             case 'TOGGLE_INVINCIBLE':
                 if (room) {
                     room.setInvincibility(adminId, payload.enabled);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Invincibility ${payload.enabled ? 'ON' : 'OFF'} for match` });
                 }
                 break;
 
             case 'FORCE_WIN':
-                if (room) room.endGame(adminId);
+                if (room) {
+                    room.endGame(adminId);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Forced Win` });
+                }
                 break;
 
             case 'FORCE_LOSE':
                 if (room) {
                     const enemyId = Object.keys(room.players).find(pid => pid !== adminId);
                     room.endGame(enemyId);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Forced Loss` });
                 }
                 break;
 
@@ -418,7 +454,10 @@ io.on('connection', (socket) => {
                 if (room) {
                     // team: 'ENEMY' or 'PLAYER'
                     const targetOwnerId = payload.team === 'PLAYER' ? adminId : Object.keys(room.players).find(pid => pid !== adminId);
-                    room.destroyTowers(targetOwnerId);
+                    if (targetOwnerId) {
+                        room.destroyTowers(targetOwnerId);
+                        socket.emit('admin_data', { type: 'LOG', payload: `Destroyed towers for ${payload.team}` });
+                    }
                 }
                 break;
 
@@ -426,19 +465,25 @@ io.on('connection', (socket) => {
                 if (room) {
                     // Spawn at bridge
                     const isP1 = room.player1Id === adminId;
-                    const bridgeY = ARENA_HEIGHT / 2;
+                    const bridgeY = 32 / 2; // ARENA_HEIGHT is 32 in gameData
                     const spawnY = isP1 ? bridgeY - 2 : bridgeY + 2;
-                    room.handleInput(adminId, { cardId: payload.cardId, x: ARENA_WIDTH / 2, y: spawnY }, true);
+                    // Note: x=9 is center if width is 18
+                    room.handleInput(adminId, { cardId: payload.cardId, x: 9, y: spawnY }, true);
+                    socket.emit('admin_data', { type: 'LOG', payload: `Spawned ${payload.cardId}` });
+                } else {
+                    socket.emit('admin_data', { type: 'LOG', payload: `Cannot spawn: No active match` });
                 }
                 break;
 
             case 'BROADCAST':
                 io.emit('success', `SERVER MSG: ${payload.msg}`);
+                socket.emit('admin_data', { type: 'LOG', payload: `Broadcasted: ${payload.msg}` });
                 break;
 
             case 'FORCE_END_ALL':
+                const count = Object.keys(ROOMS).length;
                 Object.values(ROOMS).forEach(r => r.endGame(null)); // Draw
-                socket.emit('admin_data', { type: 'LOG', payload: `Ended all matches.` });
+                socket.emit('admin_data', { type: 'LOG', payload: `Ended ${count} active matches.` });
                 break;
         }
     });
