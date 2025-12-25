@@ -23,9 +23,13 @@ class GameRoom {
     this.player2Id = player2.id; // Top Player
     this.isFriendly = false; // Flag to determine if stats should update
 
-    // Admin Overrides
+    // Admin / Modifiers
     this.godModes = {}; // userId -> boolean
     this.invincibility = {}; // userId -> boolean
+    this.frozenPlayers = {}; // userId -> boolean
+    this.elixirMultipliers = {}; // userId -> number
+    this.aiAssistance = {}; // userId -> boolean
+    this.aiTimer = 0; // throttle AI moves
 
     // P1 is "Bottom" (y=0..16 visually for them), P2 is "Top"
     // Server coordinates are absolute 0..32.
@@ -54,6 +58,18 @@ class GameRoom {
 
   setInvincibility(userId, enabled) {
       this.invincibility[userId] = enabled;
+  }
+
+  setFrozen(userId, enabled) {
+      this.frozenPlayers[userId] = enabled;
+  }
+
+  setElixirMultiplier(userId, mult) {
+      this.elixirMultipliers[userId] = mult;
+  }
+
+  setAI(userId, enabled) {
+      this.aiAssistance[userId] = enabled;
   }
 
   destroyTowers(ownerId) {
@@ -146,11 +162,21 @@ class GameRoom {
 
     Object.keys(this.players).forEach(pid => {
       const rate = this.gameState.time <= 60 ? ELIXIR_RATE / 2 : ELIXIR_RATE;
+      
+      // Admin Elixir Multiplier
+      const multiplier = this.elixirMultipliers[pid] || 1.0;
+
       // God Mode Override
       if (this.godModes[pid]) {
           this.gameState.elixir[pid] = MAX_ELIXIR;
       } else {
-          this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, this.gameState.elixir[pid] + dt / rate);
+          // Normal Gain * Multiplier
+          this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, this.gameState.elixir[pid] + (dt / rate) * multiplier);
+      }
+
+      // Check AI Assistance
+      if (this.aiAssistance[pid]) {
+          this.runAI(pid, dt);
       }
     });
 
@@ -161,9 +187,13 @@ class GameRoom {
     for (let i = this.gameState.entities.length - 1; i >= 0; i--) {
         const ent = this.gameState.entities[i];
         
-        // Safety: ensure entity def still exists (shouldn't happen but prevents crashes)
         if (!CARDS[ent.defId]) {
             this.gameState.entities.splice(i, 1);
+            continue;
+        }
+
+        // Freeze Logic: If owner is frozen, skip update (except deployment timer for simplicity)
+        if (this.frozenPlayers[ent.ownerId]) {
             continue;
         }
 
@@ -173,7 +203,7 @@ class GameRoom {
             if (ent.deathTimer <= 0) {
                 this.gameState.entities.splice(i, 1);
             }
-            continue; // Skip normal update logic for dying units
+            continue; 
         }
         
         // Handle Stun
@@ -189,14 +219,12 @@ class GameRoom {
             if (this.invincibility[ent.ownerId]) {
                 ent.hp = ent.maxHp; // Heal instantly
             } else {
-                // Transition to DYING instead of removing immediately
                 ent.state = 'DYING';
-                ent.deathTimer = 1.0; // 1 second visual decay
+                ent.deathTimer = 1.0; 
                 
                 if (ent.defId === 'tower_king') {
                     const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
                     this.endGame(winnerId);
-                    // Do NOT return here, allow the DYING state to be broadcast in the final frame
                 }
             }
         }
@@ -209,6 +237,31 @@ class GameRoom {
         entities: this.gameState.entities,
         projectiles: this.gameState.projectiles
     });
+  }
+
+  runAI(playerId, dt) {
+      this.aiTimer = (this.aiTimer || 0) + dt;
+      if (this.aiTimer < 2.0) return; // Check every 2 seconds
+      this.aiTimer = 0;
+
+      const elixir = this.gameState.elixir[playerId];
+      if (elixir < 4) return; // Wait for some elixir
+
+      // Pick a random card from user's current deck (simplified, assuming standard list)
+      const user = this.players[playerId];
+      const deck = user.currentDeck || ['knight', 'archers', 'giant', 'musketeer'];
+      const cardId = deck[Math.floor(Math.random() * deck.length)];
+      const card = CARDS[cardId];
+
+      if (card && elixir >= card.cost) {
+          // Simple placement logic
+          const isP1 = playerId === this.player1Id;
+          const bridgeY = ARENA_HEIGHT / 2;
+          const spawnY = isP1 ? bridgeY - 3 : bridgeY + 3; 
+          const spawnX = Math.random() > 0.5 ? 4.5 : ARENA_WIDTH - 4.5; // Left or Right Lane
+
+          this.handleInput(playerId, { cardId, x: spawnX, y: spawnY });
+      }
   }
 
   updateEntity(ent, dt) {
@@ -252,7 +305,6 @@ class GameRoom {
                     ent.lastAttackTime = 0;
                     
                     // Attack ALL targets
-                    // Refresh targets list to be safe
                     targets = this.findTargets(ent, def.stats, def.stats.maxTargets || 1);
                     targets.forEach(t => this.performAttack(ent, t, def.stats));
                 }
