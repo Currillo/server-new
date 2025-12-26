@@ -141,7 +141,7 @@ class GameRoom {
       state: 'DEPLOYING',
       targetId: null,
       lastAttackTime: 0,
-      deployTimer: def.stats.deployTime,
+      deployTimer: def.stats.deployTime || 1, // Fallback
       deathTimer: 0,
       stunTimer: 0,
       facingRight: true
@@ -220,7 +220,14 @@ class GameRoom {
                 continue;
             }
 
-            this.updateEntity(ent, dt);
+            try {
+                this.updateEntity(ent, dt);
+            } catch (err) {
+                console.error(`[GameRoom] Entity update failed:`, err);
+                // Remove corrupted entity to prevent loop crash
+                this.gameState.entities.splice(i, 1);
+                continue;
+            }
             
             if (ent.hp <= 0) {
                 if (this.invincibility[ent.ownerId]) {
@@ -234,10 +241,8 @@ class GameRoom {
                     // --- INSTANT WIN CHECK ---
                     if (ent.defId === 'tower_king') {
                         const loserId = ent.ownerId;
-                        // Explicitly determine winner based on ID comparison to avoid ambiguity
                         const winnerId = loserId === this.player1Id ? this.player2Id : this.player1Id;
                         
-                        // Push final state before ending
                         this.io.to(this.roomId).emit('game_update', {
                             time: this.gameState.time,
                             elixir: this.gameState.elixir,
@@ -247,7 +252,7 @@ class GameRoom {
                         });
                         
                         this.endGame(winnerId, 'TOWER_DESTROYED');
-                        return; // Stop update loop immediately
+                        return;
                     }
                 }
             }
@@ -298,6 +303,7 @@ class GameRoom {
     }
 
     const def = CARDS[ent.defId];
+    if (!def) return; // Skip if card data missing
     if (def.type === 'BUILDING') return;
 
     let targets = this.findTargets(ent, def.stats, def.stats.maxTargets || 1);
