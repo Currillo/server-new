@@ -13,6 +13,8 @@ class GameRoom {
     this.io = io;
     this.onMatchEnd = onMatchEnd; // Callback for server-side economy updates
     
+    console.log(`[GameRoom ${roomId}] Initializing. Cards loaded: ${Object.keys(CARDS || {}).length}`);
+
     // Players map: ID -> Data
     this.players = {
       [player1.id]: { ...player1, team: 'PLAYER' },
@@ -55,6 +57,7 @@ class GameRoom {
   logAction(action, detail) {
       const entry = `[${Math.floor(180 - this.gameState.time)}s] ${action}: ${detail}`;
       this.matchLog.push(entry);
+      console.log(`[GameRoom ${this.roomId}] Action: ${action} - ${detail}`);
   }
 
   pushEffect(type, position, ownerId, scale = 1) {
@@ -128,27 +131,40 @@ class GameRoom {
   }
 
   createEntity(defId, ownerId, pos) {
+    if (!CARDS) {
+        console.error('[GameRoom] FATAL: CARDS data is undefined!');
+        return null;
+    }
     const def = CARDS[defId];
-    if (!def) return null;
+    if (!def) {
+        console.error(`[GameRoom] createEntity Error: Definition not found for ${defId}`);
+        return null;
+    }
 
-    return {
-      id: uuidv4(),
-      defId,
-      ownerId,
-      position: { ...pos },
-      hp: def.stats.hp,
-      maxHp: def.stats.hp,
-      state: 'DEPLOYING',
-      targetId: null,
-      lastAttackTime: 0,
-      deployTimer: def.stats.deployTime || 1, // Fallback
-      deathTimer: 0,
-      stunTimer: 0,
-      facingRight: true
-    };
+    try {
+        return {
+          id: uuidv4(),
+          defId,
+          ownerId,
+          position: { ...pos },
+          hp: def.stats.hp,
+          maxHp: def.stats.hp,
+          state: 'DEPLOYING',
+          targetId: null,
+          lastAttackTime: 0,
+          deployTimer: def.stats.deployTime || 1, // Fallback
+          deathTimer: 0,
+          stunTimer: 0,
+          facingRight: true
+        };
+    } catch (err) {
+        console.error(`[GameRoom] createEntity Exception:`, err);
+        return null;
+    }
   }
 
   start() {
+    console.log(`[GameRoom ${this.roomId}] Starting match loop.`);
     this.io.to(this.roomId).emit('game_start', { 
       players: this.players,
       player1Id: this.player1Id,
@@ -223,7 +239,7 @@ class GameRoom {
             try {
                 this.updateEntity(ent, dt);
             } catch (err) {
-                console.error(`[GameRoom] Entity update failed:`, err);
+                console.error(`[GameRoom] Entity update failed for ${ent.id}:`, err);
                 // Remove corrupted entity to prevent loop crash
                 this.gameState.entities.splice(i, 1);
                 continue;
@@ -303,8 +319,19 @@ class GameRoom {
     }
 
     const def = CARDS[ent.defId];
-    if (!def) return; // Skip if card data missing
-    if (def.type === 'BUILDING') return;
+    if (!def) {
+        console.error(`[GameRoom] updateEntity Error: Card definition missing for ${ent.defId}`);
+        return;
+    }
+    
+    // FIX: Towers were returning here because they are BUILDING type.
+    // We only want to skip movement logic for buildings, not the whole update (if they need to attack).
+    // However, buildings don't move, so findTargets should handle them if they can attack.
+    
+    // Logic split:
+    // 1. Find targets (Building or Troop)
+    // 2. Attack if in range
+    // 3. Move if not in range AND not a building
 
     let targets = this.findTargets(ent, def.stats, def.stats.maxTargets || 1);
     
@@ -334,22 +361,27 @@ class GameRoom {
                     targets.forEach(t => this.performAttack(ent, t, def.stats));
                 }
             } else {
-                ent.state = 'MOVE';
-                this.moveTowards(ent, target.position, def.stats.speed, dt);
+                if (def.type !== 'BUILDING') {
+                    ent.state = 'MOVE';
+                    this.moveTowards(ent, target.position, def.stats.speed, dt);
+                }
             }
         }
     } else {
-        const isPlayer1 = ent.ownerId === this.player1Id;
-        const bridgeY = ARENA_HEIGHT / 2;
-        const targetY = isPlayer1 ? ARENA_HEIGHT - 2.5 : 2.5;
-        const needsBridge = isPlayer1 ? ent.position.y < bridgeY : ent.position.y > bridgeY;
-        
-        if (needsBridge) {
-             const isLeft = ent.position.x < ARENA_WIDTH / 2;
-             const bridgeX = isLeft ? 3.5 : ARENA_WIDTH - 3.5;
-             this.moveTowards(ent, { x: bridgeX, y: bridgeY }, def.stats.speed, dt);
-        } else {
-             this.moveTowards(ent, { x: ARENA_WIDTH/2, y: targetY }, def.stats.speed, dt);
+        // No targets
+        if (def.type !== 'BUILDING') {
+            const isPlayer1 = ent.ownerId === this.player1Id;
+            const bridgeY = ARENA_HEIGHT / 2;
+            const targetY = isPlayer1 ? ARENA_HEIGHT - 2.5 : 2.5;
+            const needsBridge = isPlayer1 ? ent.position.y < bridgeY : ent.position.y > bridgeY;
+            
+            if (needsBridge) {
+                 const isLeft = ent.position.x < ARENA_WIDTH / 2;
+                 const bridgeX = isLeft ? 3.5 : ARENA_WIDTH - 3.5;
+                 this.moveTowards(ent, { x: bridgeX, y: bridgeY }, def.stats.speed, dt);
+            } else {
+                 this.moveTowards(ent, { x: ARENA_WIDTH/2, y: targetY }, def.stats.speed, dt);
+            }
         }
     }
   }
@@ -535,7 +567,10 @@ class GameRoom {
       if (this.gameState.gameOver) return;
 
       const card = CARDS[cardId];
-      if (!card) return;
+      if (!card) {
+          console.error(`[GameRoom] Input Error: Card ${cardId} not found`);
+          return;
+      }
       
       const isGodMode = this.godModes[playerId];
       const currentElixir = this.gameState.elixir[playerId];
@@ -559,7 +594,7 @@ class GameRoom {
           this.gameState.elixir[playerId] -= card.cost;
       }
 
-      this.logAction('SPAWN', `${cardId}`);
+      this.logAction('SPAWN', `${cardId} by ${playerId}`);
 
       if (card.stats.projectileType === 'LOG') {
           this.gameState.projectiles.push({
@@ -642,6 +677,8 @@ class GameRoom {
                         });
                         this.pushEffect('ZAP', ent.position, ent.ownerId, 1.5);
                   }
+              } else {
+                  console.error(`[GameRoom] Spawn failed: createEntity returned null for ${cardId}`);
               }
           });
       }
