@@ -19,26 +19,20 @@ class GameRoom {
       [player2.id]: { ...player2, team: 'ENEMY' } 
     };
 
-    // Store explicit references to who is who for orientation
     this.player1Id = player1.id; // Bottom Player
     this.player2Id = player2.id; // Top Player
-    this.isFriendly = false; // Flag to determine if stats should update
+    this.isFriendly = false;
 
-    // Admin / Modifiers
-    this.godModes = {}; // userId -> boolean
-    this.invincibility = {}; // userId -> boolean
-    this.frozenPlayers = {}; // userId -> boolean
-    this.elixirMultipliers = {}; // userId -> number
-    this.aiAssistance = {}; // userId -> boolean
-    this.aiTimer = 0; // throttle AI moves
+    // Modifiers
+    this.godModes = {}; 
+    this.invincibility = {}; 
+    this.frozenPlayers = {}; 
+    this.elixirMultipliers = {}; 
+    this.aiAssistance = {}; 
+    this.aiTimer = 0; 
 
-    // Match Logging
     this.matchLog = [];
 
-    // P1 is "Bottom" (y=0..16 visually for them), P2 is "Top"
-    // Server coordinates are absolute 0..32.
-    // P1 Base at y=0, P2 Base at y=32.
-    
     this.gameState = {
       time: 180, // 3 minutes
       gameOver: false,
@@ -48,8 +42,9 @@ class GameRoom {
       projectiles: []
     };
     
-    this.effectQueue = []; // Accumulate effects to broadcast
+    this.effectQueue = []; 
 
+    // Initial Towers
     this.spawnTowers(player1.id, 'BOTTOM');
     this.spawnTowers(player2.id, 'TOP');
 
@@ -60,7 +55,6 @@ class GameRoom {
   logAction(action, detail) {
       const entry = `[${Math.floor(180 - this.gameState.time)}s] ${action}: ${detail}`;
       this.matchLog.push(entry);
-      // console.log(`[Room ${this.roomId}] ${entry}`);
   }
 
   pushEffect(type, position, ownerId, scale = 1) {
@@ -74,50 +68,25 @@ class GameRoom {
   }
 
   // --- Admin Methods ---
-  setGodMode(userId, enabled) {
-      this.godModes[userId] = enabled;
-      this.logAction('ADMIN', `God Mode ${enabled} for ${userId}`);
-  }
-
-  setInvincibility(userId, enabled) {
-      this.invincibility[userId] = enabled;
-      this.logAction('ADMIN', `Invincibility ${enabled} for ${userId}`);
-  }
-
-  setFrozen(userId, enabled) {
-      this.frozenPlayers[userId] = enabled;
-      this.logAction('ADMIN', `Freeze ${enabled} for ${userId}`);
-  }
-
-  setElixirMultiplier(userId, mult) {
-      this.elixirMultipliers[userId] = mult;
-      this.logAction('ADMIN', `Elixir Mult ${mult}x for ${userId}`);
-  }
-
-  setAI(userId, enabled) {
-      this.aiAssistance[userId] = enabled;
-      this.logAction('ADMIN', `AI ${enabled} for ${userId}`);
-  }
-
+  setGodMode(userId, enabled) { this.godModes[userId] = enabled; }
+  setInvincibility(userId, enabled) { this.invincibility[userId] = enabled; }
+  setFrozen(userId, enabled) { this.frozenPlayers[userId] = enabled; }
+  setElixirMultiplier(userId, mult) { this.elixirMultipliers[userId] = mult; }
+  setAI(userId, enabled) { this.aiAssistance[userId] = enabled; }
+  
   destroyTowers(ownerId) {
       this.gameState.entities.forEach(e => {
           if (e.ownerId === ownerId && e.defId.startsWith('tower')) {
               e.hp = 0;
           }
       });
-      this.logAction('ADMIN', `Nuked towers for ${ownerId}`);
   }
 
-  // NEW: Get lightweight stats for admin inspector
   getLiveStats(userId) {
       const elixir = this.gameState.elixir[userId] || 0;
-      
-      // Calculate total tower HP
       const towerHp = this.gameState.entities
           .filter(e => e.ownerId === userId && e.defId.startsWith('tower'))
           .reduce((sum, e) => sum + e.hp, 0);
-
-      // Count active units (excluding towers)
       const unitCount = this.gameState.entities
           .filter(e => e.ownerId === userId && !e.defId.startsWith('tower'))
           .length;
@@ -128,7 +97,6 @@ class GameRoom {
           unitCount,
           isFrozen: !!this.frozenPlayers[userId],
           isGodMode: !!this.godModes[userId],
-          isInvincible: !!this.invincibility[userId],
           elixirMult: this.elixirMultipliers[userId] || 1,
           timeRemaining: Math.floor(this.gameState.time)
       };
@@ -136,7 +104,6 @@ class GameRoom {
 
   addSpectator(socket) {
       socket.join(this.roomId);
-      // Emit game_start to the spectator so their client initializes the engine
       socket.emit('game_start', {
           players: this.players,
           player1Id: this.player1Id,
@@ -145,15 +112,12 @@ class GameRoom {
           isFriendly: this.isFriendly,
           spectating: true
       });
-      console.log(`[GameRoom] Spectator ${socket.user.username} joined room ${this.roomId}`);
   }
-  // ---------------------
 
   spawnTowers(playerId, side) {
     const yPrincess = side === 'BOTTOM' ? 6.5 : ARENA_HEIGHT - 6.5;
     const yKing = side === 'BOTTOM' ? 2.5 : ARENA_HEIGHT - 2.5;
 
-    // Safety: ensure createEntity returns a valid object before pushing
     const t1 = this.createEntity('tower_princess', playerId, { x: 3.5, y: yPrincess });
     const t2 = this.createEntity('tower_princess', playerId, { x: ARENA_WIDTH - 3.5, y: yPrincess });
     const t3 = this.createEntity('tower_king', playerId, { x: ARENA_WIDTH / 2, y: yKing });
@@ -165,10 +129,7 @@ class GameRoom {
 
   createEntity(defId, ownerId, pos) {
     const def = CARDS[defId];
-    if (!def) {
-        console.error(`[GameRoom] Invalid Card ID in createEntity: ${defId}`);
-        return null;
-    }
+    if (!def) return null;
 
     return {
       id: uuidv4(),
@@ -177,7 +138,7 @@ class GameRoom {
       position: { ...pos },
       hp: def.stats.hp,
       maxHp: def.stats.hp,
-      state: 'DEPLOYING', // Start with deploy time
+      state: 'DEPLOYING',
       targetId: null,
       lastAttackTime: 0,
       deployTimer: def.stats.deployTime,
@@ -188,8 +149,6 @@ class GameRoom {
   }
 
   start() {
-    console.log(`[Room ${this.roomId}] Initializing...`);
-    // Notify clients match found, they play Intro animation
     this.io.to(this.roomId).emit('game_start', { 
       players: this.players,
       player1Id: this.player1Id,
@@ -198,82 +157,56 @@ class GameRoom {
       isFriendly: this.isFriendly
     });
     
-    // Wait for intro to finish before starting simulation
     setTimeout(() => {
-        console.log(`[Room ${this.roomId}] Game Loop Started`);
-        this.lastTime = Date.now(); // Reset time anchor
+        this.lastTime = Date.now();
         this.intervalId = setInterval(() => this.update(), 1000 / TICK_RATE);
     }, INTRO_DELAY_MS);
   }
 
   update() {
     if (this.gameState.gameOver) {
-      clearInterval(this.intervalId);
-      return;
+        clearInterval(this.intervalId);
+        return;
     }
 
     try {
         const now = Date.now();
-        const dt = (now - this.lastTime) / 1000; // Delta time in seconds
+        const dt = Math.min((now - this.lastTime) / 1000, 0.1); 
         this.lastTime = now;
 
-        // 1. Time & Elixir
+        // 1. Time Check
         this.gameState.time -= dt;
         if (this.gameState.time <= 0) {
-            this.endGame('DRAW');
+            this.endGame(null, 'TIME_UP'); 
             return;
         }
 
+        // 2. Elixir Generation
         Object.keys(this.players).forEach(pid => {
           const rate = this.gameState.time <= 60 ? ELIXIR_RATE / 2 : ELIXIR_RATE;
-          
-          // Admin Elixir Multiplier
           const multiplier = this.elixirMultipliers[pid] || 1.0;
-
-          // Initialize if missing (Safety check)
-          if (typeof this.gameState.elixir[pid] === 'undefined') {
-              this.gameState.elixir[pid] = 5;
-          }
-
-          // God Mode Override - Force Max Elixir every tick
+          
           if (this.godModes[pid]) {
               this.gameState.elixir[pid] = MAX_ELIXIR;
           } else {
-              // Normal Gain * Multiplier
-              this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, this.gameState.elixir[pid] + (dt / rate) * multiplier);
+              let current = this.gameState.elixir[pid] || 0;
+              current += (dt / rate) * multiplier;
+              this.gameState.elixir[pid] = Math.min(MAX_ELIXIR, current);
           }
 
-          // Check AI Assistance
-          if (this.aiAssistance[pid]) {
-              this.runAI(pid, dt);
-          }
+          if (this.aiAssistance[pid]) this.runAI(pid, dt);
         });
 
-        // 2. Projectiles
+        // 3. Update Projectiles
         this.updateProjectiles(dt);
 
-        // 3. Entities
+        // 4. Update Entities & Check Deaths
         for (let i = this.gameState.entities.length - 1; i >= 0; i--) {
             const ent = this.gameState.entities[i];
-            
-            // Safety Check: If entity is null/undefined, remove it and continue
-            if (!ent) {
-                this.gameState.entities.splice(i, 1);
-                continue;
-            }
+            if (!ent) continue;
 
-            // Safety Check: If Def is missing
-            if (!CARDS[ent.defId]) {
-                this.gameState.entities.splice(i, 1);
-                continue;
-            }
+            if (this.frozenPlayers[ent.ownerId]) continue;
 
-            // Freeze Logic: If owner is frozen, skip update (except deployment timer for simplicity)
-            if (this.frozenPlayers[ent.ownerId]) {
-                continue;
-            }
-
-            // Handle Dying State (Visual feedback buffer)
             if (ent.state === 'DYING') {
                 ent.deathTimer = (ent.deathTimer || 1) - dt;
                 if (ent.deathTimer <= 0) {
@@ -282,7 +215,6 @@ class GameRoom {
                 continue; 
             }
             
-            // Handle Stun
             if (ent.stunTimer > 0) {
                 ent.stunTimer -= dt;
                 continue;
@@ -291,38 +223,44 @@ class GameRoom {
             this.updateEntity(ent, dt);
             
             if (ent.hp <= 0) {
-                // Invincibility Override
                 if (this.invincibility[ent.ownerId]) {
-                    ent.hp = ent.maxHp; // Heal instantly
+                    ent.hp = ent.maxHp;
                 } else {
                     ent.state = 'DYING';
                     ent.deathTimer = 1.0;
-                    
-                    // VFX: Death & Elixir
                     this.pushEffect('DEATH', ent.position, ent.ownerId);
                     this.pushEffect('ELIXIR_STAIN', ent.position, ent.ownerId);
                     
+                    // --- INSTANT WIN CHECK ---
                     if (ent.defId === 'tower_king') {
-                        const winnerId = Object.keys(this.players).find(id => id !== ent.ownerId);
+                        const loserId = ent.ownerId;
+                        // Explicitly determine winner based on ID comparison to avoid ambiguity
+                        const winnerId = loserId === this.player1Id ? this.player2Id : this.player1Id;
+                        
+                        // Push final state before ending
+                        this.io.to(this.roomId).emit('game_update', {
+                            time: this.gameState.time,
+                            elixir: this.gameState.elixir,
+                            entities: this.gameState.entities,
+                            projectiles: this.gameState.projectiles,
+                            effects: this.effectQueue
+                        });
+                        
                         this.endGame(winnerId, 'TOWER_DESTROYED');
-                        return; // Stop update loop immediately if game over
+                        return; // Stop update loop immediately
                     }
                 }
             }
         }
 
-        // 4. Broadcast
-        if (!this.gameState.gameOver) {
-            this.io.to(this.roomId).emit('game_update', {
-                time: this.gameState.time,
-                elixir: this.gameState.elixir,
-                entities: this.gameState.entities,
-                projectiles: this.gameState.projectiles,
-                effects: this.effectQueue // Broadcast gathered effects
-            });
-        }
-        
-        // Clear effects after broadcast
+        // 5. Broadcast State
+        this.io.to(this.roomId).emit('game_update', {
+            time: this.gameState.time,
+            elixir: this.gameState.elixir,
+            entities: this.gameState.entities,
+            projectiles: this.gameState.projectiles,
+            effects: this.effectQueue
+        });
         this.effectQueue = [];
 
     } catch (e) {
@@ -332,25 +270,22 @@ class GameRoom {
 
   runAI(playerId, dt) {
       this.aiTimer = (this.aiTimer || 0) + dt;
-      if (this.aiTimer < 2.0) return; // Check every 2 seconds
+      if (this.aiTimer < 2.0) return; 
       this.aiTimer = 0;
 
       const elixir = this.gameState.elixir[playerId];
-      if (elixir < 4) return; // Wait for some elixir
+      if (elixir < 4) return; 
 
-      // Pick a random card from user's current deck (simplified, assuming standard list)
       const user = this.players[playerId];
       const deck = user.currentDeck || ['knight', 'archers', 'giant', 'musketeer'];
       const cardId = deck[Math.floor(Math.random() * deck.length)];
       const card = CARDS[cardId];
 
       if (card && elixir >= card.cost) {
-          // Simple placement logic
           const isP1 = playerId === this.player1Id;
           const bridgeY = ARENA_HEIGHT / 2;
           const spawnY = isP1 ? bridgeY - 3 : bridgeY + 3; 
-          const spawnX = Math.random() > 0.5 ? 4.5 : ARENA_WIDTH - 4.5; // Left or Right Lane
-
+          const spawnX = Math.random() > 0.5 ? 4.5 : ARENA_WIDTH - 4.5;
           this.handleInput(playerId, { cardId, x: spawnX, y: spawnY });
       }
   }
@@ -365,10 +300,8 @@ class GameRoom {
     const def = CARDS[ent.defId];
     if (def.type === 'BUILDING') return;
 
-    // AI Logic: Find Target or Move
     let targets = this.findTargets(ent, def.stats, def.stats.maxTargets || 1);
     
-    // Check if current target is invalid
     if (ent.targetId) {
         const currentTarget = this.gameState.entities.find(e => e.id === ent.targetId && e.state !== 'DYING');
         if (!currentTarget) ent.targetId = null;
@@ -379,9 +312,7 @@ class GameRoom {
     }
 
     if (ent.targetId) {
-        // We have at least one target (the primary one)
         const target = this.gameState.entities.find(e => e.id === ent.targetId);
-        
         if (target) {
             const dx = target.position.x - ent.position.x;
             const dy = target.position.y - ent.position.y;
@@ -389,29 +320,22 @@ class GameRoom {
             const range = def.stats.range + 0.5 + (CARDS[target.defId]?.stats?.radius || 0.5); 
             
             if (distSq <= range * range) {
-                // Attack
                 ent.state = 'ATTACK';
                 ent.lastAttackTime += dt;
                 if (ent.lastAttackTime >= def.stats.hitSpeed) {
                     ent.lastAttackTime = 0;
-                    
-                    // Attack ALL targets
                     targets = this.findTargets(ent, def.stats, def.stats.maxTargets || 1);
                     targets.forEach(t => this.performAttack(ent, t, def.stats));
                 }
             } else {
-                // Move towards PRIMARY target
                 ent.state = 'MOVE';
                 this.moveTowards(ent, target.position, def.stats.speed, dt);
             }
         }
     } else {
-        // No target? Move towards enemy King Tower end
         const isPlayer1 = ent.ownerId === this.player1Id;
         const bridgeY = ARENA_HEIGHT / 2;
         const targetY = isPlayer1 ? ARENA_HEIGHT - 2.5 : 2.5;
-
-        // Bridge Logic
         const needsBridge = isPlayer1 ? ent.position.y < bridgeY : ent.position.y > bridgeY;
         
         if (needsBridge) {
@@ -445,7 +369,6 @@ class GameRoom {
           return true;
       });
 
-      // Sort by distance
       candidates.sort((a, b) => {
           const d1 = (me.position.x - a.position.x)**2 + (me.position.y - a.position.y)**2;
           const d2 = (me.position.x - b.position.x)**2 + (me.position.y - b.position.y)**2;
@@ -457,7 +380,6 @@ class GameRoom {
 
   performAttack(source, target, stats) {
       if (stats.range > 1.5 || stats.projectileType === 'BEAM') {
-          // Projectile
           this.gameState.projectiles.push({
               id: uuidv4(),
               ownerId: source.ownerId,
@@ -471,9 +393,8 @@ class GameRoom {
               stunDuration: stats.stunDuration
           });
       } else {
-          // Instant Melee
           if (stats.splashRadius > 0) {
-              this.pushEffect('SPARKS', source.position, source.ownerId, 1.2); // VFX
+              this.pushEffect('SPARKS', source.position, source.ownerId, 1.2); 
               this.gameState.entities.forEach(e => {
                   if (e.ownerId !== source.ownerId && e.state !== 'DYING') {
                       const d2 = (e.position.x - source.position.x)**2 + (e.position.y - source.position.y)**2;
@@ -484,7 +405,7 @@ class GameRoom {
               });
           } else {
               target.hp -= stats.damage;
-              this.pushEffect('SPARKS', target.position, source.ownerId); // VFX
+              this.pushEffect('SPARKS', target.position, source.ownerId);
           }
       }
   }
@@ -494,7 +415,6 @@ class GameRoom {
           const p = this.gameState.projectiles[i];
           
           if (p.type === 'LOG') {
-               // Log Logic
                const dx = p.targetPos.x - p.position.x;
                const dy = p.targetPos.y - p.position.y;
                const distToTarget = Math.sqrt(dx*dx + dy*dy);
@@ -505,21 +425,17 @@ class GameRoom {
                p.position.x += dirX * move;
                p.position.y += dirY * move;
 
-               // Collision
                this.gameState.entities.forEach(e => {
                    if (e.ownerId !== p.ownerId && e.hp > 0 && e.state !== 'DYING') {
                        if (p.hitList && !p.hitList.includes(e.id)) {
-                            // Check collision
                             const d2 = (e.position.x - p.position.x)**2 + (e.position.y - p.position.y)**2;
                             if (d2 < (p.splashRadius)**2) {
                                 e.hp -= p.damage;
                                 p.hitList.push(e.id);
-                                this.pushEffect('DUST', e.position, p.ownerId); // VFX
+                                this.pushEffect('DUST', e.position, p.ownerId); 
                                 if (p.knockback) {
                                      e.position.x += dirX * p.knockback;
                                      e.position.y += dirY * p.knockback;
-                                     e.position.x = Math.max(0, Math.min(ARENA_WIDTH, e.position.x));
-                                     e.position.y = Math.max(0, Math.min(ARENA_HEIGHT, e.position.y));
                                 }
                             }
                        }
@@ -529,7 +445,7 @@ class GameRoom {
                const distTraveled = p.startPos ? Math.sqrt((p.position.x - p.startPos.x)**2 + (p.position.y - p.startPos.y)**2) : 999;
                if (distTraveled >= (p.maxRange || 10)) {
                    this.gameState.projectiles.splice(i, 1);
-                   this.pushEffect('LOG_BREAK', p.position, p.ownerId); // VFX
+                   this.pushEffect('LOG_BREAK', p.position, p.ownerId);
                }
                continue;
           }
@@ -544,15 +460,10 @@ class GameRoom {
           const dist = Math.sqrt(dx*dx + dy*dy);
 
           if (dist < 0.5) {
-              // HIT EVENT
-              
-              // Goblin Barrel Spawn Logic
               if (p.type === 'BARREL' && p.spawnUnitId) {
-                  this.pushEffect('EXPLOSION', p.targetPos, p.ownerId, 1.5); // VFX
+                  this.pushEffect('EXPLOSION', p.targetPos, p.ownerId, 1.5);
                   const count = p.spawnCount || 3;
-                  const offsets = [
-                      {x: 0, y: -0.8}, {x: -0.7, y: 0.4}, {x: 0.7, y: 0.4}
-                  ];
+                  const offsets = [{x: 0, y: -0.8}, {x: -0.7, y: 0.4}, {x: 0.7, y: 0.4}];
                   for (let k = 0; k < count; k++) {
                       const offset = offsets[k % 3];
                       const ent = this.createEntity(p.spawnUnitId, p.ownerId, { 
@@ -569,7 +480,6 @@ class GameRoom {
               }
 
               if (p.splashRadius > 0) {
-                  // Area VFX
                   if (p.type === 'ZAP') {
                       this.pushEffect('ZAP', p.targetPos, p.ownerId, 2);
                   } else {
@@ -596,7 +506,7 @@ class GameRoom {
                   const target = this.gameState.entities.find(e => e.id === p.targetId);
                   if (target) {
                       target.hp -= p.damage;
-                      this.pushEffect('SPARKS', p.targetPos, p.ownerId); // VFX
+                      this.pushEffect('SPARKS', p.targetPos, p.ownerId);
                       if (p.stunDuration) target.stunTimer = p.stunDuration;
                   }
               }
@@ -606,7 +516,6 @@ class GameRoom {
               p.position.x += (dx/dist) * move;
               p.position.y += (dy/dist) * move;
               
-              // Calc Progress
               if (p.startPos) {
                   const totalDist = Math.sqrt((p.startPos.x - p.targetPos.x)**2 + (p.startPos.y - p.targetPos.y)**2) || 1;
                   const distTraveled = Math.sqrt((p.startPos.x - p.position.x)**2 + (p.startPos.y - p.position.y)**2);
@@ -620,60 +529,38 @@ class GameRoom {
       if (this.gameState.gameOver) return;
 
       const card = CARDS[cardId];
-      if (!card) {
-          console.log(`[GameRoom] handleInput failed: Invalid Card ${cardId}`);
-          return;
-      }
+      if (!card) return;
       
       const isGodMode = this.godModes[playerId];
-
-      // Safe elixir check
       const currentElixir = this.gameState.elixir[playerId];
-      if (typeof currentElixir === 'undefined') {
-          console.log(`[GameRoom] Elixir undefined for player ${playerId}`);
-          return;
-      }
 
-      // Cost Check
       if (!bypassCost && !isGodMode) {
-          if (currentElixir < card.cost - 0.1) {
-              console.log(`[GameRoom] Not enough elixir: Has ${currentElixir}, Need ${card.cost}`);
-              return;
-          }
+          if (currentElixir < card.cost - 0.1) return;
       }
 
-      // Validate Side (skip validation if admin spawn or spell)
+      // Valid Spawn Zone Check
       const isPlayer1 = playerId === this.player1Id;
       const bridgeY = ARENA_HEIGHT / 2;
-      
-      // Goblin Barrel and Miner can spawn anywhere
-      const isGlobalSpawn = card.id === 'goblin_barrel' || card.type === 'SPELL';
+      const isGlobalSpawn = card.id === 'goblin_barrel' || card.type === 'SPELL'; // Global range cards
 
       if (!bypassCost && !isGlobalSpawn && card.stats.projectileType !== 'LOG') {
-          // Added +1 tolerance for floating point / lag / hitbox issues at bridge
-          if (isPlayer1 && y > bridgeY + 1.0) {
-              console.log(`[GameRoom] handleInput failed: P1 tried to spawn at ${y} (Enemy Side)`);
-              return;
-          }
-          if (!isPlayer1 && y < bridgeY - 1.0) {
-              console.log(`[GameRoom] handleInput failed: P2 tried to spawn at ${y} (Enemy Side)`);
-              return;
-          }
+          // Strict spawn zone enforcement
+          if (isPlayer1 && y > bridgeY) return; // P1 cannot spawn in top half
+          if (!isPlayer1 && y < bridgeY) return; // P2 cannot spawn in bottom half
       }
 
       if (!bypassCost && !isGodMode) {
           this.gameState.elixir[playerId] -= card.cost;
       }
 
-      this.logAction('SPAWN', `${cardId} by ${playerId} at ${Math.floor(x)},${Math.floor(y)}`);
+      this.logAction('SPAWN', `${cardId}`);
 
-      // SPecial LOG Logic
       if (card.stats.projectileType === 'LOG') {
           this.gameState.projectiles.push({
             id: uuidv4(),
             ownerId: playerId,
-            targetId: null, // Log doesn't target an entity, it targets a direction
-            targetPos: { x, y: y + (isPlayer1 ? 10 : -10) }, // Move forward
+            targetId: null, 
+            targetPos: { x, y: y + (isPlayer1 ? 10 : -10) }, 
             damage: card.stats.damage,
             speed: card.stats.speed,
             position: { x, y }, 
@@ -688,7 +575,6 @@ class GameRoom {
           return;
       }
 
-      // Goblin Barrel Projectile Logic
       if (cardId === 'goblin_barrel') {
           this.gameState.projectiles.push({
               id: uuidv4(),
@@ -699,7 +585,7 @@ class GameRoom {
               damage: 0,
               speed: 15,
               position: { x, y: isPlayer1 ? 0 : ARENA_HEIGHT },
-              team: 'PLAYER', // Used for visualization if needed, mapped by ID usually
+              team: 'PLAYER',
               splashRadius: 1.5,
               progress: 0,
               type: 'BARREL',
@@ -731,17 +617,14 @@ class GameRoom {
           
           offsets.forEach(off => {
               const ent = this.createEntity(cardId, playerId, { x: x + off.x, y: y + off.y });
-              
               if (bypassCost || isGodMode) {
-                  ent.deployTimer = 0; // Instant deploy for admin spawns
+                  ent.deployTimer = 0; 
                   ent.state = 'IDLE';
               }
-
               if (ent) {
                   this.gameState.entities.push(ent);
-                  this.pushEffect('SPAWN', ent.position, ent.ownerId); // VFX
+                  this.pushEffect('SPAWN', ent.position, ent.ownerId); 
 
-                  // Spawn Damage (E-Wiz)
                   if (card.stats.spawnDamage) {
                        const radius = card.stats.splashRadius || 2;
                         this.gameState.entities.forEach(target => {
@@ -751,7 +634,6 @@ class GameRoom {
                                 if (card.stats.stunDuration) target.stunTimer = card.stats.stunDuration;
                             }
                         });
-                        // Visual
                         this.pushEffect('ZAP', ent.position, ent.ownerId, 1.5);
                   }
               }
@@ -781,27 +663,24 @@ class GameRoom {
       this.gameState.gameOver = true;
       this.gameState.winner = winnerId;
       
-      // Calculate Trophies
       let trophyChange = 0;
       if (!this.isFriendly && winnerId) {
-          trophyChange = 30; // Standard reward
+          trophyChange = 30; 
       }
       
-      // Execute Server Callback for Economy (Gold/Chests)
       if (this.onMatchEnd) {
           try {
               this.onMatchEnd(winnerId, this.players, this.isFriendly);
           } catch (e) {
-              console.error(`[GameRoom] Error in onMatchEnd callback: ${e.message}`);
+              console.error(`[GameRoom] Error in onMatchEnd: ${e.message}`);
           }
       }
       
       this.io.to(this.roomId).emit('game_over', { 
           winnerId,
           reason,
-          trophyChange // Clients can use this if they want authoritative data
+          trophyChange 
       });
-      console.log(`[Room ${this.roomId}] Game Over. Winner: ${winnerId}, Reason: ${reason}, Trophies: ${trophyChange}`);
       
       clearInterval(this.intervalId);
   }
